@@ -37,6 +37,14 @@ public struct InstallerLocations: Sendable, Equatable {
         try LegacyStateMigration.locations(home: home, checkpoint: migrationCheckpoint)
     }
 
+    /// `~/Library/Application Support/Patched`, from the account database. It holds the updater folder and the
+    /// local update history. Refused while `PATCHED_FORBID_REAL_STATE=1`. Creates nothing.
+    public static func patchedSupportFolder() throws -> String {
+        try RealStateTripwire.check("InstallerLocations.patchedSupportFolder()")
+        guard let home = accountHome() else { throw InstallRefusal.io("cannot find the current user's home folder") }
+        return home + "/Library/Application Support/Patched"
+    }
+
     /// Everything under one directory (tests, temporary applications roots).
     public static func under(_ root: String) -> InstallerLocations {
         InstallerLocations(downloads: root + "/downloads", transactions: root + "/transactions", backups: root + "/backups")

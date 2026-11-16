@@ -363,6 +363,44 @@ Deadlines set by an organisation will come in a later release. They will be read
 from forced managed preferences, as automatic updates are, and fail closed (no deadline)
 on a value of the wrong type. They will never block the Mac or quit apps.
 
+## Update history
+
+Patched keeps a record of each update run in `~/Library/Application Support/Patched/history.json`:
+when it ran, what started it (the schedule, Update All, one app's Update, or `patched update`), how
+many apps were checked and had updates, and for each app attempted its name, bundle ID, old and new
+versions, the result, the same plain-English line the Updates screen showed, and a short refusal
+code. A scheduled run that found nothing, or had to wait, is recorded too. `patched update
+--dry-run` records nothing.
+
+- **It never leaves the Mac.** Nothing in the history is sent anywhere: no network request reads
+  it, and the only requests Patched makes are the ones listed under "What the tool trusts". The
+  history is read only by the History screen, its Export CSV… button and the one "Last run"
+  line in the menu.
+- **It is a record, not an input.** Nothing reads the history to decide what to check, install,
+  roll back or announce. Someone who can change the file can only change what History shows.
+- **Written safely.** The app and the command line both write it, so each change takes a lock on
+  `.history.lock` beside it, re-reads the file, and replaces it atomically (a 0600 temporary
+  file, fsync, rename). A file that is not a regular file owned by you, is larger than 16 MB, or
+  cannot be decoded is never parsed in part or overwritten: it is moved aside as
+  `history.json.unreadable-<time>` and a new history starts. A history written by a newer
+  Patched (a higher `version`) is left exactly as it is, and nothing is recorded into it. A
+  writer waits at most a second for the lock, then records nothing. A history that cannot be
+  read or written never stops or changes an update.
+- **Only real attempts.** An app is listed only when an install was actually attempted. On the
+  command line, refusals before that (a filename-only match, a Mac App Store app, a check that
+  failed) are reported as before but not recorded as failed updates. Apps whose check failed
+  are not counted as up to date.
+- **Kept for 90 days or the last 500 runs**, whichever is smaller, pruned when the app opens and after
+  each `patched update` run.
+  Each run is capped at 300 apps and each line in length, so the file stays small.
+- **Export only on a click.** Export CSV… writes a copy only after you choose a file in the
+  save panel, and only there. Any cell a spreadsheet would read as a formula (starting with
+  `=`, `+`, `-`, `@`, a tab or a carriage return, even after leading spaces) is prefixed with an apostrophe, so an app
+  name or message cannot run as one when the file is opened.
+- **Local privacy.** The file holds app names, versions and messages that can include folder
+  paths, readable by your account like the update journals. Uninstall removes it with the rest
+  of the Patched folder. Under `PATCHED_FORBID_REAL_STATE=1` the default store keeps to memory.
+
 ## Out of scope
 
 - **Malware already running as you.** It can change your apps directly, so the

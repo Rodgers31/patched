@@ -15,11 +15,12 @@ import PatchedShell
     }
     check("navigation: Available is absent without a catalogue and present, between Updates and Applications, with one") {
         let state = fixtureNavigation()
-        try expect(!state.availableShown && state.mainDestinations == expectedMain && state.mainDestinations.count == 2,
+        try expect(!state.availableShown && state.mainDestinations == expectedMain && state.mainDestinations.count == 3,
                    "Available is listed with no catalogue: \(state.mainDestinations)")
-        try expect(state.focusOrder == ["destination:updates", "destination:applications", "destination:support"], "focus order changed")
+        try expect(state.focusOrder == ["destination:updates", "destination:applications", "destination:history", "destination:support"],
+                   "focus order changed")
         state.setAvailableShown(true)
-        try expect(state.mainDestinations == [.updates, .available, .applications] && state.lowerDestinations == expectedLower,
+        try expect(state.mainDestinations == [.updates, .available, .applications, .history] && state.lowerDestinations == expectedLower,
                    "Available missing or misplaced: \(state.mainDestinations)")
         try expect(state.label(for: .available) == "Available", "Available label")
         state.setAvailableShown(false)
@@ -67,7 +68,7 @@ import PatchedShell
         try expect(state.destination == .updates && events.isEmpty, "Invalid input mutated state or callbacks")
     }
     check("focus declaration: ordered destinations, the same on every destination; Settings is its own window") {
-        let expected = ["destination:updates", "destination:applications", "destination:support"]
+        let expected = ["destination:updates", "destination:applications", "destination:history", "destination:support"]
         try expect(fixtureNavigation().focusOrder == expected && fixtureNavigation(destination: .support).focusOrder == expected,
                    "Declared destination traversal missing")
     }
@@ -103,15 +104,16 @@ import PatchedShell
     }
     check("render sidebar: the brand-blue selection sits on the selected row only") {
         var centres: [ShellDestination: Double] = [:]
-        for destination in [ShellDestination.updates, .applications, .support] {
+        for destination in [ShellDestination.updates, .applications, .history, .support] {
             let state = fixtureNavigation(destination: destination)
             let result = try render(ShellView(navigation: state, destinationContent: { probe($0.rawValue) }))
             let (count, centreY) = try brandBluePixels(result.image, maxX: 190)
             try expect(count > 1500, "No brand-blue selected row for \(destination.rawValue) (\(count) px)")
             centres[destination] = centreY
         }
-        let u = centres[.updates] ?? 0, a = centres[.applications] ?? 0, h = centres[.support] ?? 0
-        try expect(u < a && a < h && a - u > 10, "Selection did not move with the destination: \(u) \(a) \(h)")
+        let u = centres[.updates] ?? 0, a = centres[.applications] ?? 0, y = centres[.history] ?? 0, h = centres[.support] ?? 0
+        try expect(u < a && a < y && y < h && a - u > 10 && y - a > 10,
+                   "Selection did not move with the destination, or History is not between Applications and Help & Support: \(u) \(a) \(y) \(h)")
     }
 }
 

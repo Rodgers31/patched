@@ -7,10 +7,10 @@ import UniformTypeIdentifiers
 import PatchedShell
 
 // Literal approved specification, intentionally independent of product-generated lists.
-let expectedMain: [ShellDestination] = [.updates, .applications]
+let expectedMain: [ShellDestination] = [.updates, .applications, .history]
 let expectedLower: [ShellDestination] = [.support]
 let destinationLabels: [(ShellDestination, String)] = [
-    (.updates, "Updates"), (.applications, "Applications"),
+    (.updates, "Updates"), (.applications, "Applications"), (.history, "History"),
     (.support, "Help & Support")
 ]
 let longLabel = String(repeating: "Prüfung des Aktualisierungsverlaufs 日本語 ", count: 4)

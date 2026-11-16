@@ -303,7 +303,7 @@ public enum Uninstall {
             checkJournals(in: newSupport + "/Updater/transactions", legacy: false)
             checkJournals(in: oldSupport + "/transactions", legacy: true)
             checkMigrationMarker()
-            supportItems(newSupport, backupsRelative: ["Updater", "backups"], kind: .support, reason: "Patched's catalogue, journals and settings")
+            supportItems(newSupport, backupsRelative: ["Updater", "backups"], kind: .support, reason: "Patched's catalogue, journals, settings and update history")
             supportItems(oldSupport, backupsRelative: ["backups"], kind: .legacySupport, reason: "older mac-updater support folder")
             for name in [".patched-state-migration.json", ".patched-state-migration.lock", ".patched-state-migration.lease"] {
                 simple(roots.supportParent + "/" + name, .migrationFile, "state migration file")

@@ -784,6 +784,10 @@ registerPlainRefusalChecks()
 registerAvailableChecks()
 registerMacOSUpdateChecks()
 registerMacOSReminderChecks()
+registerHistoryChecks()
+registerHistoryScreenChecks()
+registerHistoryRenderChecks()
+registerHistoryExportChecks()
 
 var failures = 0
 for (name, action) in cases {

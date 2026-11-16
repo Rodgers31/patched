@@ -39,8 +39,9 @@ import UserNotifications
                                       intentIdentifiers: [], options: [])
     }
 
-    /// Body tap of either notification opens the Updates screen; only the button on the "updates available"
-    /// notification updates anything. Anything else is ignored.
+    /// Body tap of either notification opens the Updates screen (the summary after an automatic run opens its run
+    /// in History instead, see `handle`); only the button on the "updates available" notification updates anything.
+    /// Anything else is ignored.
     nonisolated public static func route(requestIdentifier: String, actionIdentifier: String) -> Route? {
         if requestIdentifier == Self.requestIdentifier || requestIdentifier == Self.summaryIdentifier
             || requestIdentifier == Self.selfUpdateIdentifier || requestIdentifier == Self.macOSUpdateIdentifier,
@@ -56,6 +57,15 @@ import UserNotifications
     public var onOpenUpdates: (@MainActor () -> Void)? {
         didSet { if pendingOpen, let handler = onOpenUpdates { pendingOpen = false; handler() } }
     }
+    /// Called when the user clicks the summary after an automatic run that names its history run. Queued like
+    /// the open request, and run once.
+    public var onOpenHistory: (@MainActor (UUID) -> Void)? {
+        didSet { if let runID = pendingHistory, let handler = onOpenHistory { pendingHistory = nil; handler(runID) } }
+    }
+    /// userInfo key holding the history run an automatic summary describes.
+    nonisolated public static let historyRunUserInfoKey = "historyRunID"
+    private var pendingHistory: UUID?
+
     /// Called when the user chooses Update All on the notification, with the update keys that notification
     /// advertised. Queued like the open request (with its keys), and run once.
     public var onUpdateAll: (@MainActor (Set<String>) -> Void)? {
@@ -93,7 +103,14 @@ import UserNotifications
     /// Applies a notification response. Separate from the delegate callback so it can be exercised directly.
     public func handle(requestIdentifier: String, actionIdentifier: String, userInfo: [AnyHashable: Any] = [:]) {
         switch Self.route(requestIdentifier: requestIdentifier, actionIdentifier: actionIdentifier) {
-        case .openUpdates?: openRequested()
+        case .openUpdates?:
+            // The summary after an automatic run opens that run in History; anything else opens Updates.
+            if requestIdentifier == Self.summaryIdentifier,
+               let runID = (userInfo[Self.historyRunUserInfoKey] as? String).flatMap(UUID.init(uuidString:)) {
+                if let onOpenHistory { onOpenHistory(runID) } else { pendingHistory = runID }
+            } else {
+                openRequested()
+            }
         case .updateAll?:
             // A response without the advertised keys advertises nothing, so it can install nothing.
             updateAllRequested(keys: Set((userInfo[Self.updateKeysUserInfoKey] as? [String]) ?? []))
@@ -176,16 +193,20 @@ import UserNotifications
     public func notify(summary: UpdateAllSummary) { post(summary: summary, title: String(localized: "Update All finished")) }
 
     /// The summary after an automatic run at the chosen time.
-    public func notify(automaticSummary: UpdateAllSummary) {
-        post(summary: automaticSummary, title: String(localized: "Updated automatically"))
+    public func notify(automaticSummary: UpdateAllSummary) { notify(automaticSummary: automaticSummary, historyRunID: nil) }
+
+    /// The same; clicking it opens the run in History when there is one.
+    public func notify(automaticSummary: UpdateAllSummary, historyRunID: UUID?) {
+        post(summary: automaticSummary, title: String(localized: "Updated automatically"), historyRunID: historyRunID)
     }
 
-    private func post(summary: UpdateAllSummary, title: String) {
+    private func post(summary: UpdateAllSummary, title: String, historyRunID: UUID? = nil) {
         guard runsFromAppBundle else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = summary.text
         content.threadIdentifier = Self.requestIdentifier
+        if let historyRunID { content.userInfo = [Self.historyRunUserInfoKey: historyRunID.uuidString] }
         Task { @MainActor in
             let center = UNUserNotificationCenter.current()
             let settings = await center.notificationSettings()

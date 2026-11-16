@@ -246,6 +246,8 @@ public struct NativeClientMenuItem: Equatable, Identifiable, Sendable {
         case updatePatched
         case downloadPatched
         case dismissPatchedFailure
+        /// "Last run: ...": open History at that run. Installs nothing.
+        case showHistory(runID: UUID)
     }
     public enum Kind: Equatable, Sendable { case text, command(Action), separator }
 
@@ -257,6 +259,8 @@ public struct NativeClientMenuItem: Equatable, Identifiable, Sendable {
     public var shortcut: Character?
     /// The installed app whose icon the item shows.
     public var iconPath: String?
+    /// A symbol shown before the title, such as the warning on a last run that had a failure.
+    public var systemImage: String?
 
     public var action: Action? { if case .command(let action) = kind { return action }; return nil }
 }
@@ -269,15 +273,20 @@ extension NativeClientSession {
         var items: [NativeClientMenuItem] = []
         func text(_ id: String, _ title: String) { items.append(NativeClientMenuItem(id: id, kind: .text, title: title)) }
         func command(_ id: String, _ title: String, _ action: NativeClientMenuItem.Action, enabled: Bool = true,
-                     shortcut: Character? = nil, iconPath: String? = nil) {
+                     shortcut: Character? = nil, iconPath: String? = nil, systemImage: String? = nil) {
             items.append(NativeClientMenuItem(id: id, kind: .command(action), title: title, enabled: enabled,
-                                              shortcut: shortcut, iconPath: iconPath))
+                                              shortcut: shortcut, iconPath: iconPath, systemImage: systemImage))
         }
         func separator(_ id: String) { items.append(NativeClientMenuItem(id: id, kind: .separator, title: "")) }
 
         text("header", list.header)
         if let checked = list.checkedAt { text("checked", String(localized: "Checked \(checked)")) }
         if let note = list.note { text("note", note) }
+        // The newest recorded run, from memory: opening the menu reads no files. Marked when something failed.
+        if let run = updates.lastRun {
+            command("last-run", HistoryModel.lastRunLine(run), .showHistory(runID: run.id),
+                    systemImage: run.hasFailures ? "exclamationmark.triangle" : nil)
+        }
         if let available = list.selfUpdateText, let own = updates.selfUpdate {
             let state = updates.selfInstall
             separator("self-separator")
@@ -375,6 +384,8 @@ public struct NativeClientMenuView: View {
     @ViewBuilder private func label(_ item: NativeClientMenuItem) -> some View {
         if let path = item.iconPath {
             Label { Text(verbatim: item.title) } icon: { Image(nsImage: menuIcon(path)) }
+        } else if let symbol = item.systemImage {
+            Label { Text(verbatim: item.title) } icon: { Image(systemName: symbol) }
         } else {
             Text(verbatim: item.title)
         }
@@ -411,6 +422,7 @@ public struct NativeClientMenuView: View {
         case .updatePatched: session.requestSelfUpdateFromMenu(confirm: confirmSelfUpdate)
         case .downloadPatched: updates.downloadSelfUpdate()
         case .dismissPatchedFailure: updates.cancelSelfUpdate()
+        case .showHistory(let runID): if session.showHistory(runID: runID) { openWindow() }
         }
     }
 

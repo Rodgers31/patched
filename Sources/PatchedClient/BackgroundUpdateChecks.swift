@@ -114,6 +114,8 @@ public enum LoginItemStatus: Equatable, Sendable {
     private let macOSReminders: MacOSReminderSettings?
     private let calendar: Calendar
     private var automaticRetryToken: (any CancellableToken)?
+    /// The day, and each reason already put in the history that day, so retries add nothing more.
+    private var deferralsRecorded: (day: String, reasons: Set<String>)?
     private var timerToken: (any CancellableToken)?
     private var wakeToken: (any CancellableToken)?
     private var ownCheckInFlight = false
@@ -249,8 +251,14 @@ public enum LoginItemStatus: Equatable, Sendable {
         // A check (the user's, say) is running: its own end comes back here.
         guard controller.phase == .idle else { return }
         // Never during an install, rollback or recovery, with installing blocked, or over an open confirmation:
-        // look again shortly, while the window lasts. Nothing is recorded, so the day is not spent.
+        // look again shortly, while the window lasts. The day is not spent (only the wait goes in the history).
         guard !controller.automaticRunMustWait else {
+            // Recorded once a day per reason, not on every retry, even when reasons take turns.
+            let today = AutomaticUpdateSchedule.dayKey(now(), calendar: calendar), reason = controller.automaticRunWaitReason ?? ""
+            if deferralsRecorded?.day != today { deferralsRecorded = (today, []) }
+            if deferralsRecorded?.reasons.insert(reason).inserted == true {
+                controller.recordDeferredAutomaticRun()
+            }
             automaticRetryToken?.cancel()
             automaticRetryToken = timer.schedule(after: Self.deferDelay) { [weak self] in self?.runAutomaticIfDue() }
             return
@@ -258,11 +266,13 @@ public enum LoginItemStatus: Equatable, Sendable {
         automaticRetryToken?.cancel(); automaticRetryToken = nil
         // Recorded as the run starts, so a relaunch the same day, or a second check, never runs it again.
         automatic.lastRunDay = AutomaticUpdateSchedule.dayKey(now(), calendar: calendar)
-        let notifier = summaryNotifier
+        let notifier = summaryNotifier, controller = controller
         controller.updateAll(only: nil, askInWindow: false, automatic: true) { summary in
             // Quiet when nothing was installed, failed or skipped for being open.
             guard summary.updated + summary.failed + summary.skippedOpen > 0 else { return }
-            notifier?.notify(automaticSummary: summary)
+            // The run is recorded just before this is called, so the newest run is this one.
+            let run = controller.lastRun.flatMap { $0.trigger == .scheduled ? $0.id : nil }
+            notifier?.notify(automaticSummary: summary, historyRunID: run)
         }
     }
 
@@ -617,11 +627,18 @@ extension NativeClientSession {
     /// clicked. Safe to call more than once; does nothing for a fixture session.
     public func startBackgroundChecks(showMainWindow: @escaping @MainActor () -> Void) {
         guard let backgroundChecks, !backgroundChecks.started else { return }
+        // Launch: drop runs older than 90 days or beyond the last 500, then show the newest in the menu.
+        appUpdates.history?.prune(now: Date())
+        appUpdates.reloadHistory()
         let openUpdates: @MainActor () -> Void = { [weak self] in
             self?.navigation.select(.updates)
             showMainWindow()
         }
         updateNotifier?.onOpenUpdates = openUpdates
+        updateNotifier?.onOpenHistory = { [weak self] runID in
+            self?.showHistory(runID: runID)
+            showMainWindow()
+        }
         wireNotificationActions(openUpdates: openUpdates)
         wireSelfUpdateAction(openUpdates: openUpdates)
         updateNotifier?.activate()

@@ -12,6 +12,8 @@ import UpdateSources
     public let appUpdates: AppUpdatesController
     /// Self Service: the organisation's catalogue. It shares `appUpdates`' busy state. Nothing is read until `reload()`.
     public let selfService: SelfServiceController
+    /// The History screen's runs, read from `appUpdates.history` when shown.
+    public let history: HistoryController
     private var availableVisibility: AnyCancellable?
     public let openAtLogin: OpenAtLoginController
     public let notificationStatus: NotificationStatusController
@@ -32,7 +34,10 @@ import UpdateSources
         // Reads only the setup-completed flag, so a finished setup is not shown again.
         firstRun = NativeFirstRunController(navigation: resolvedNavigation)
         let live = AppUpdatesController.live()
+        // Resolved and read on first use only; under the test tripwire it stays in memory.
+        live.history = FileHistoryStore.standard()
         appUpdates = live
+        history = HistoryController(store: { [weak live] in live?.history })
         selfService = SelfServiceController.live(updates: live)
         urlOpener = live.urlOpener
         // Construction touches nothing else real: the login item, notification centre and stored check time
@@ -61,6 +66,8 @@ import UpdateSources
         self.navigation = navigation
         self.firstRun = setup
         self.appUpdates = appUpdates ?? AppUpdatesController.inert()
+        let updates = self.appUpdates
+        self.history = HistoryController(store: { [weak updates] in updates?.history })
         // Unless a fixture gives one, Self Service sees no catalogue and installs nothing.
         self.selfService = selfService ?? SelfServiceController(
             updates: self.appUpdates, catalogue: { .notManaged }, scan: { [] }, teamID: { _ in nil },
@@ -139,6 +146,9 @@ public struct NativeClientRootView: View {
                 .frame(minHeight: 440)
         case .available:
             AvailableView(controller: session.selfService)
+                .frame(minHeight: 440)
+        case .history:
+            HistoryView(history: session.history, updates: session.appUpdates)
                 .frame(minHeight: 440)
         case .support:
             ScrollView { supportPanel }

@@ -145,6 +145,25 @@ and `02:00:00` are all refused) is ignored: the user's own time, or 02:00, appli
 says a managed value was ignored. Only values that are forced count, so a plain user default never locks anything.
 See `THREAT-MODEL.md`, "Automatic updates".
 
+## History
+
+Patched keeps a record of every update run, so you can see what happened while you were away.
+The **History** screen in the sidebar lists runs newest first, grouped by day: scheduled runs,
+Update All, single app updates and `patched update` on the command line. A scheduled run that
+found nothing to install is listed as "Checked 12 apps, all up to date", and one that had to
+wait says why. Open a run to see each app's old and new version, the result and the same
+message the Updates screen showed. **Failures only** and the app picker narrow the list. The
+menu bar menu shows the last run, for example "Last run: today 03:00, 3 updated", with a
+warning sign when something failed, and the notification after an automatic run opens that
+run in History.
+
+The history stays on your Mac, in `~/Library/Application Support/Patched/history.json`. It is
+never sent anywhere. Patched keeps 90 days or the last 500 runs, whichever is smaller, and
+Uninstall removes it. **Export CSV…** saves a copy, for all runs or a date range, only when you
+click it and only where you choose in the save panel. `patched update --dry-run` is not recorded.
+See `THREAT-MODEL.md`, "Update history".
+
+
 ## Self Service
 
 For organisations: a catalogue of approved apps that people can install for themselves, without

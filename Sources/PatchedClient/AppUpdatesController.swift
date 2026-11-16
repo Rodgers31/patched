@@ -546,6 +546,14 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     @Published public private(set) var macOSLookupPending = false
     /// Called when the macOS lookup of the current check has been applied. Used by the background scheduler.
     var onMacOSLookupFinished: (() -> Void)?
+    /// Where update runs are recorded. nil (fixtures, `inert()`): nothing is recorded.
+    public var history: (any HistoryStoring)?
+    /// The newest recorded run, kept in memory so the menu never reads a file. Set by `recordRun` and `reloadHistory`.
+    @Published public private(set) var lastRun: HistoryRun?
+    /// The clock history timestamps come from. Tests replace it.
+    @_spi(Testing) public var historyNow: () -> Date = { Date() }
+    /// What `performUpdate` learnt about its last step for each path, beyond `StepResult`.
+    private var stepInfo: [String: StepInfo] = [:]
     /// Where "Not now" is remembered. `live()` uses the user's defaults; everything else keeps it in memory.
     public var macOSHiding: any MacOSUpdateHiding = MemoryMacOSUpdateHiding() { didSet { macOSHiddenKeys = macOSHiding.hiddenKeys } }
     @Published private var macOSHiddenKeys: [String] = []
@@ -732,9 +740,15 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     }
     /// Why an automatic run must wait: work in progress, installing blocked (a broken catalogue or an unreadable
     /// journal), or a confirmation the user has not answered (a "quit and update" question or Patched's own update).
-    var automaticRunMustWait: Bool {
-        if case .confirming = selfInstall { return true }
-        return isWorking || installBlocked || pendingQuit != nil || deferredQuit != nil
+    var automaticRunMustWait: Bool { automaticRunWaitReason != nil }
+    /// The reason behind `automaticRunMustWait`, in plain English, for the history. nil: the run may start.
+    var automaticRunWaitReason: String? {
+        if case .confirming = selfInstall { return String(localized: "a question about updating Patched was waiting for an answer") }
+        if isWorking { return String(localized: "another update, roll back or recovery was running") }
+        if catalogueError != nil { return String(localized: "catalogue.json can't be read, so installing was paused") }
+        if !unreadableJournals.isEmpty { return String(localized: "an unfinished update record can't be read, so installing was paused") }
+        if pendingQuit != nil || deferredQuit != nil { return String(localized: "a question about an open app was waiting for an answer") }
+        return nil
     }
     /// The same identity as `AvailableUpdate.key`, for an outcome freshly rechecked.
     nonisolated static func updateKey(_ outcome: AppCheckOutcome) -> String? {
@@ -1081,7 +1095,11 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     public func update(id: String) {
         guard let row = row(id: id), canUpdate(row) else { return }
         let admin = mayUseAdmin(row)
-        launch { _ = await self.performUpdate(path: id, quit: false, interactive: true, admin: admin, cancellable: true) }
+        let start = beginRun()
+        launch {
+            let step = await self.performUpdate(path: id, quit: false, interactive: true, admin: admin, cancellable: true)
+            self.recordRun(start, trigger: .singleApp, items: [self.historyItem(path: id, before: row, step)])
+        }
     }
 
     /// Cancel is offered on a single update while it is downloading or verifying, never once the swap has begun,
@@ -1138,11 +1156,20 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         // App Store updates are never installed here; Update All only opens the App Store for them, once, after
         // the installable updates have run. With nothing installable, that is all it does.
         let storeAtStart = automatic ? 0 : scopedAppStoreCount(keys)
+        let trigger: HistoryRun.Trigger = automatic ? .scheduled : .updateAll
+        // A scheduled run with nothing it may install is still a run: "Checked 12 apps, all up to date".
+        if automatic, paths.isEmpty, !isWorking, phase == .idle, !installBlocked {
+            recordRun(beginRun(), trigger: .scheduled, items: [])
+        }
         guard !paths.isEmpty || storeAtStart > 0, !isWorking, phase == .idle, !installBlocked else { return false }
         stopRequested = false
+        let start = beginRun()
         if paths.isEmpty {
             launch {
                 let opened = await self.urlOpener.openAppStoreUpdates()
+                self.recordRun(start, trigger: trigger, items: [],
+                               note: opened ? String(localized: "opened the App Store for \(storeAtStart)")
+                                            : String(localized: "couldn't open the App Store"))
                 self.summary = opened ? String(localized: "\(storeAtStart) to update in the App Store.") : Self.appStoreOpenFailure
                 onFinished?(UpdateAllSummary(updated: 0, failed: 0, skippedOpen: 0, needsAdmin: self.knownNeedsAdmin(keys).count,
                                              appStore: opened ? storeAtStart : 0, appStoreFailed: opened ? 0 : storeAtStart))
@@ -1154,11 +1181,15 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             var updated = 0, failed = 0, skipped = 0, open = 0, stopped = 0, changed = 0
             var adminPaths = Set<String>()
             var openPaths: [String] = []
+            var items: [HistoryItem] = []
             for (index, path) in paths.enumerated() {
                 if self.stopRequested { stopped = paths.count - index; skipped += stopped; break }
+                let before = self.row(id: path)
                 // Never with admin rights: rows that need them are not in `updatableRows`, and one that turns
                 // out to need them is skipped (and marked String(localized: "Update (admin)") when admin updates are on).
-                switch await self.performUpdate(path: path, quit: false, interactive: false, admin: false, onlyKeys: keys) {
+                let step = await self.performUpdate(path: path, quit: false, interactive: false, admin: false, onlyKeys: keys)
+                items.append(self.historyItem(path: path, before: before, step))
+                switch step {
                 case .updated: updated += 1
                 case .failed: failed += 1
                 case .changed: changed += 1
@@ -1183,6 +1214,12 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             // Rows outside a notification's scope are not part of this run's report.
             let known = self.knownNeedsAdmin(keys)
             if self.stopRequested { openPaths = [] }
+            var note: String?
+            if stopped > 0 { note = String(localized: "\(stopped) not attempted after Stop") }
+            if store > 0 { note = [note, String(localized: "opened the App Store for \(store)")].compactMap { $0 }.joined(separator: ", ") }
+            if storeFailed > 0 { note = [note, String(localized: "couldn't open the App Store")].compactMap { $0 }.joined(separator: ", ") }
+            // Recorded before `onFinished`, so a summary notification can point at this run.
+            self.recordRun(start, trigger: trigger, items: items, note: note)
             // The Updates window asks once, after the run, about the apps that were open; `launch` offers it
             // as soon as the run is over. The epoch is the one `launch` set for this run.
             if askInWindow, !openPaths.isEmpty {
@@ -1221,11 +1258,20 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         guard !paths.isEmpty else { return false }
         stopRequested = false
         updateAllProgress = UpdateAllProgress(done: 0, total: paths.count, stopping: false)
+        let start = beginRun()
         launch {
             var updated = 0, failed = 0, stopped = 0, needsAdmin = 0
+            var items: [HistoryItem] = []
+            defer {
+                self.recordRun(start, trigger: paths.count == 1 ? .singleApp : .updateAll, items: items,
+                               note: stopped > 0 ? String(localized: "\(stopped) not attempted after Stop") : nil)
+            }
             for (index, path) in paths.enumerated() {
                 if self.stopRequested { stopped = paths.count - index; break }
-                switch await self.performUpdate(path: path, quit: true, interactive: false, admin: false, cancellable: true) {
+                let before = self.row(id: path)
+                let step = await self.performUpdate(path: path, quit: true, interactive: false, admin: false, cancellable: true)
+                items.append(self.historyItem(path: path, before: before, step))
+                switch step {
                 case .updated: updated += 1
                 case .needsAdmin: needsAdmin += 1
                 case .failed, .changed, .skippedRunning: failed += 1
@@ -1391,7 +1437,11 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         case .update:
             guard let row = row(id: pending.path), canUpdate(row), row.installedVersion == pending.installedVersion else { return }
             let admin = mayUseAdmin(row)
-            launch { _ = await self.performUpdate(path: pending.path, quit: true, interactive: false, admin: admin, cancellable: true) }
+            let start = beginRun()
+            launch {
+                let step = await self.performUpdate(path: pending.path, quit: true, interactive: false, admin: admin, cancellable: true)
+                self.recordRun(start, trigger: .singleApp, items: [self.historyItem(path: pending.path, before: row, step)])
+            }
         case .rollback:
             guard let row = row(id: pending.path), canRollBack(row), row.installedVersion == pending.installedVersion else { return }
             launch { await self.performRollback(path: pending.path, quit: true) }
@@ -1507,6 +1557,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
 
     private func performUpdate(path: String, quit: Bool, interactive: Bool, admin: Bool, onlyKeys: Set<String>? = nil,
                                cancellable: Bool = false) async -> StepResult {
+        stepInfo[path] = nil
         guard let shown = row(id: path), shown.outcome != nil else { return .failed }
         mutate(path) { $0.activity = .updating; $0.result = nil; $0.progress = nil; $0.cancelRequested = false }
         // Whatever way this ends, the row stops showing progress and Cancel.
@@ -1551,6 +1602,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         do {
             // The installer enforces `installable` itself as well.
             let report = try await installer.update(outcome, quitIfRunning: quit, admin: interaction, progress: progress)
+            stepInfo[path] = StepInfo(newVersion: report.toVersion)
             mutate(path) {
                 $0.result = .init(kind: .success, text: Self.reportText(name: outcome.app.name, report))
                 $0.installedVersion = report.toVersion; $0.installedDisplayVersion = nil; $0.status = .needsRecheck; $0.outcome = nil
@@ -1560,6 +1612,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             if Task.isCancelled { await Task { @MainActor in await self.refreshRow(path) }.value } else { await refreshRow(path) }
             return .updated
         } catch is CancellationError {
+            stepInfo[path] = StepInfo(cancelled: true)
             mutate(path) {
                 $0.activity = .idle
                 $0.result = .init(kind: .info, text: String(localized: "Cancelled. \(outcome.app.name) was not changed."))
@@ -1567,6 +1620,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             return .failed
         } catch let refusal as InstallRefusal {
             let name = outcome.app.name
+            stepInfo[path] = StepInfo(detail: refusal.code)
             if case .needsAdmin = refusal, interaction == nil {
                 // Needs admin rights whether or not the experimental admin path is on; only with it on does
                 // the row offer String(localized: "Update (admin)").
@@ -1601,6 +1655,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             mutate(path) { $0.activity = .idle; $0.result = result }
             return .failed
         } catch {
+            stepInfo[path] = StepInfo(detail: "internal_error: \(error)")
             mutate(path) {
                 $0.activity = .idle
                 $0.result = .init(kind: .failure, text: OutcomeText.line(name: outcome.app.name, status: "refused", from: nil,
@@ -1608,6 +1663,79 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             }
             return .failed
         }
+    }
+
+    // MARK: History
+
+    /// What one step learnt that `StepResult` does not say: the version installed, a Cancel, a refusal code.
+    private struct StepInfo {
+        var newVersion: String? = nil
+        var cancelled = false
+        var detail: String? = nil
+    }
+
+    /// The start of a run: when it began, and what the last check had found.
+    struct RunStart {
+        let at: Date
+        let appsChecked: Int
+        let updatesFound: Int
+        /// Apps whose last check failed, so "all up to date" is never claimed for them.
+        var notChecked = 0
+    }
+
+    func beginRun() -> RunStart {
+        // Every update on offer counts as found, as in the menu, including ones Patched cannot install itself.
+        let found = rows.filter {
+            $0.status == .updateAvailable || $0.status == .appStoreUpdate || $0.status == .packageUnsupported || $0.status == .notInstallable
+        }.count
+        let failed = rows.filter { if case .refused = $0.status { return true }; return false }.count
+        let checked = rows.filter { $0.status != .pending && $0.status != .needsRecheck }.count - failed
+        return RunStart(at: historyNow(), appsChecked: checked, updatesFound: found, notChecked: failed)
+    }
+
+    /// Records a finished run and makes it the menu's last run. Does nothing without a store.
+    func recordRun(_ start: RunStart, trigger: HistoryRun.Trigger, items: [HistoryItem], outcome: HistoryRun.Outcome? = nil,
+                   note: String? = nil) {
+        guard let history else { return }
+        var note = note
+        if start.notChecked > 0, outcome != .deferred {
+            let missed = start.notChecked == 1 ? String(localized: "couldn't check 1 app")
+                                               : String(localized: "couldn't check \(start.notChecked) apps")
+            note = [note, missed].compactMap { $0 }.joined(separator: ", ")
+        }
+        let run = HistoryRun(startedAt: start.at, finishedAt: max(start.at, historyNow()), trigger: trigger,
+                             appsChecked: start.appsChecked, updatesFound: start.updatesFound, outcome: outcome, note: note, items: items)
+        history.record(run)
+        lastRun = run
+    }
+
+    /// A scheduled run that could not start yet, and why.
+    func recordDeferredAutomaticRun() {
+        guard let reason = automaticRunWaitReason else { return }
+        recordRun(beginRun(), trigger: .scheduled, items: [], outcome: .deferred, note: reason)
+    }
+
+    /// Reads the newest run from the store again (at launch, and when History is shown, to see command-line runs).
+    public func reloadHistory() { lastRun = history?.runs().first }
+
+    /// One app's line in the history, from its row before the step, the step's result and the row's message after it.
+    private func historyItem(path: String, before: AppUpdateRow?, _ step: StepResult) -> HistoryItem {
+        let after = row(id: path)
+        let info = stepInfo.removeValue(forKey: path)
+        let result: HistoryItem.Result
+        switch step {
+        case .updated: result = .updated
+        case .failed: result = info?.cancelled == true ? .cancelled : .failed
+        case .skippedRunning: result = .skippedOpen
+        case .needsAdmin: result = .needsAdmin
+        case .changed: result = .changed
+        }
+        let old = before.map { $0.installedDisplayVersion ?? $0.installedVersion }
+        // Only an update that happened has a new version; a failed or skipped one stays at the old version.
+        let new = step == .updated ? (info?.newVersion ?? before?.latestVersion) : nil
+        return HistoryItem(name: before?.name ?? after?.name ?? (path as NSString).lastPathComponent,
+                           bundleID: before?.bundleID ?? after?.bundleID, oldVersion: old, newVersion: new, result: result,
+                           reason: after?.result?.text, detail: info?.detail)
     }
 
     private func performRollback(path: String, quit: Bool) async {

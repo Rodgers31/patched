@@ -93,6 +93,7 @@ public struct ShellView: View {
         case .updates: return "arrow.down.circle"
         case .available: return "plus.app"
         case .applications: return "square.grid.2x2"
+        case .history: return "clock.arrow.circlepath"
         case .support: return "questionmark.circle"
         }
     }

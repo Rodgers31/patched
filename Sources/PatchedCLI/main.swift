@@ -273,6 +273,8 @@ func describe(_ row: UpdateRow) -> String {
             return refusedRow(app, code: "not_installable",
                               message: "matched to a Homebrew cask by filename only; add a catalogue entry for \(app.bundleID ?? app.name) to enable updates")
         }
+        // Only from here on is an install attempted; the refusals above are reported but never reach history.
+        attemptedPaths.insert(app.path)
         do {
             // The installer enforces `installable` itself as well.
             let report = try await CommandLineUpdates.update(outcome, installer: installer,
@@ -285,6 +287,44 @@ func describe(_ row: UpdateRow) -> String {
             return refusedRow(app, code: "internal_error", message: "\(error)")
         }
     }
+}
+
+// MARK: History
+
+/// Where `patched update` records its runs: beside the temporary state for `--state-root` and
+/// `--applications-root`, otherwise the same `history.json` the app keeps. A dry run records nothing.
+@MainActor func historyStore() -> (any HistoryStoring)? {
+    if dryRun { return nil }
+    if let stateRoot { return FileHistoryStore(folder: { stateRoot }) }
+    if let applicationsRoot { return FileHistoryStore(folder: { applicationsRoot + "/.Patched-state" }) }
+    return FileHistoryStore.standard()
+}
+
+/// Apps this command actually tried to install. A refusal before that (no installable match, an App Store app,
+/// a failed check) is not a failed update, so it is left out of the history.
+var attemptedPaths = Set<String>()
+
+@MainActor func historyItem(_ row: UpdateRow) -> HistoryItem? {
+    guard attemptedPaths.contains(row.path) else { return nil }
+    let result: HistoryItem.Result
+    switch (row.status, row.reason) {
+    case ("installed", _): result = .updated
+    case ("refused", "app_running"?): result = .skippedOpen
+    case ("refused", "needs_admin"?): result = .needsAdmin
+    case ("refused", _): result = .failed
+    default: return nil       // up to date, no source, dry run: nothing was attempted
+    }
+    return HistoryItem(name: row.name, bundleID: row.bundleID, oldVersion: row.fromVersion,
+                       newVersion: result == .updated ? row.toVersion : nil, result: result, reason: describe(row), detail: row.reason)
+}
+
+/// Records one `patched update` run. Never changes what the command prints or its exit code.
+@MainActor func recordHistory(started: Date, appsChecked: Int, updatesFound: Int, rows: [UpdateRow]) {
+    guard let store = historyStore() else { return }
+    store.record(HistoryRun(startedAt: started, finishedAt: Date(), trigger: .commandLine, appsChecked: appsChecked,
+                            updatesFound: updatesFound, items: rows.compactMap(historyItem)))
+    // The app prunes at launch too; this keeps a command-line-only Mac within 90 days as well.
+    store.prune(now: Date())
 }
 
 @MainActor func emit(_ rows: [UpdateRow]) -> Never {
@@ -304,6 +344,7 @@ func describe(_ row: UpdateRow) -> String {
 switch command {
 case "update":
     let installer = makeInstaller(), checker = makeChecker()
+    let started = Date()
     if all {
         guard positional.isEmpty else { fail("update --all takes no app\n" + usage, code: 2) }
         let apps = await scan(applicationsRoot.map { [$0] })
@@ -317,6 +358,7 @@ case "update":
             if !asJSON { print(describe(result)) }
             rows.append(result)
         }
+        recordHistory(started: started, appsChecked: outcomes.count, updatesFound: rows.count, rows: rows)
         if !asJSON {
             let refused = rows.filter { $0.status == "refused" }.count
             print("\n\(outcomes.count) apps checked, \(rows.count) with updates, \(rows.count - refused) \(dryRun ? "verified" : "updated"), \(refused) refused.")
@@ -326,7 +368,13 @@ case "update":
     }
     guard positional.count == 1 else { fail("update needs one app path or bundle ID, or --all\n" + usage, code: 2) }
     let app = await resolveTarget(positional[0])
-    emit([await updateOne(app, installer: installer, checker: checker)])
+    let result = await updateOne(app, installer: installer, checker: checker)
+    // One app: recorded when it was up to date or an install was attempted, not when it could not be checked or installed.
+    let attempted = historyItem(result) != nil
+    if attempted || result.status == "up_to_date" {
+        recordHistory(started: started, appsChecked: 1, updatesFound: attempted ? 1 : 0, rows: [result])
+    }
+    emit([result])
 
 case "rollback":
     guard positional.count == 1 else { fail("rollback needs one app path or bundle ID\n" + usage, code: 2) }

@@ -75,10 +75,13 @@ extension AppUpdatesController {
     func notify(summary: UpdateAllSummary)
     /// The summary after an automatic run. Open apps were left alone and stay offered as normal.
     func notify(automaticSummary: UpdateAllSummary)
+    /// The same, naming the history run it describes, so clicking it opens that run in History.
+    func notify(automaticSummary: UpdateAllSummary, historyRunID: UUID?)
 }
 
 extension UpdateSummaryNotifying {
     public func notify(automaticSummary: UpdateAllSummary) { notify(summary: automaticSummary) }
+    public func notify(automaticSummary: UpdateAllSummary, historyRunID: UUID?) { notify(automaticSummary: automaticSummary) }
 }
 
 /// Routes the menu item and the notification action to `AppUpdatesController.updateAll()`.

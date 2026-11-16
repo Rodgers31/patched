@@ -1,14 +1,14 @@
 import SwiftUI
 
 public enum ShellDestination: String, CaseIterable, Hashable, Sendable {
-    case updates, available, applications, support
+    case updates, available, applications, history, support
 }
 
 /// Main-actor display selection only. Callbacks convey no operational authority.
 @MainActor public final class ShellNavigation: ObservableObject {
     @Published public private(set) var destination: ShellDestination
     /// Whether the Available (Self Service) destination is listed. Display only: the owner sets it from whether an
-    /// organisation catalogue is managed on this Mac; with none, the sidebar is exactly Updates and Applications.
+    /// organisation catalogue is managed on this Mac; with none, the sidebar is exactly Updates, Applications and History.
     @Published public private(set) var availableShown = false
     private let onSelection: (ShellDestination) -> Void
 
@@ -18,7 +18,7 @@ public enum ShellDestination: String, CaseIterable, Hashable, Sendable {
         self.onSelection = onSelection
     }
     public var mainDestinations: [ShellDestination] {
-        availableShown ? [.updates, .available, .applications] : [.updates, .applications]
+        availableShown ? [.updates, .available, .applications, .history] : [.updates, .applications, .history]
     }
     /// Lists or hides Available. Hiding it while it is selected returns to Updates.
     public func setAvailableShown(_ shown: Bool) {
@@ -36,6 +36,7 @@ public enum ShellDestination: String, CaseIterable, Hashable, Sendable {
         case .updates: return String(localized: "Updates")
         case .available: return String(localized: "Available")
         case .applications: return String(localized: "Applications")
+        case .history: return String(localized: "History")
         case .support: return String(localized: "Help & Support")
         }
     }

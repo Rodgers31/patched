@@ -383,14 +383,14 @@ private func ink(_ png: Data) throws -> (width: Int, height: Int, pixel: (Int, I
         let (controller, updates) = rig(fixture)
         let navigation = ShellNavigation(destination: .updates)
         let session = NativeClientSession(navigation: navigation, appUpdates: updates, selfService: controller)
-        try expect(!navigation.availableShown && navigation.mainDestinations == [.updates, .applications], "listed with no catalogue at launch")
+        try expect(!navigation.availableShown && navigation.mainDestinations == [.updates, .applications, .history], "listed with no catalogue at launch")
         await controller.reload()
         try await Task.sleep(nanoseconds: 50_000_000)
         try expect(!navigation.availableShown, "listed after reading no catalogue")
         fixture.catalogue = SelfServiceCatalogue.parse(array: [entryDictionary("Alpha")])!
         await session.reloadSelfService()
         try await eventually("Available to be listed") { navigation.availableShown }
-        try expect(navigation.mainDestinations == [.updates, .available, .applications], "\(navigation.mainDestinations)")
+        try expect(navigation.mainDestinations == [.updates, .available, .applications, .history], "\(navigation.mainDestinations)")
         navigation.select(.available)
         fixture.catalogue = .invalid(reason: SelfServiceCatalogue.invalidCatalogueReason)
         await session.reloadSelfService()
@@ -399,7 +399,7 @@ private func ink(_ png: Data) throws -> (width: Int, height: Int, pixel: (Int, I
         fixture.catalogue = .notManaged
         await session.reloadSelfService()
         try await eventually("Available to be hidden again") { !navigation.availableShown }
-        try expect(navigation.destination == .updates && navigation.mainDestinations == [.updates, .applications], "not back to Updates")
+        try expect(navigation.destination == .updates && navigation.mainDestinations == [.updates, .applications, .history], "not back to Updates")
         let view = try String(contentsOfFile: sourcesRoot() + "/PatchedClient/AvailableView.swift", encoding: .utf8)
         try expect(!view.contains("\u{2014}"), "em dash in AvailableView")
         try expect(!AvailableViewTexts.all.contains { $0.contains("\u{2014}") }, "em dash in screen text")
