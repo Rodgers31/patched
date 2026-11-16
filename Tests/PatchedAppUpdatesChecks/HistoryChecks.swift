@@ -344,6 +344,26 @@ private func item(_ name: String, _ result: HistoryItem.Result, id: String? = ni
     }
 }
 
+@MainActor func registerHistoryAppsLineChecks() {
+    check("history: a closed run names its apps, updated first, with versions when there is one") {
+        let at3 = at(15, 3)
+        func names(_ items: [HistoryItem]) -> String? {
+            HistoryModel.appsLine(HistoryRun(startedAt: at3, finishedAt: at3, trigger: .updateAll, appsChecked: 9, updatesFound: items.count, items: items))
+        }
+        try expect(names([]) == nil, "no apps: \(String(describing: names([])))")
+        try expect(names([item("DuckDuckGo", .updated)]) == "DuckDuckGo 1.0 → 2.0", "one: \(String(describing: names([item("DuckDuckGo", .updated)])))")
+        let bare = HistoryItem(name: "Tool", bundleID: nil, oldVersion: nil, newVersion: nil, result: .failed, reason: nil)
+        try expect(names([bare]) == "Tool", "no versions: just the name")
+        try expect(names([item("Bravo", .failed)]) == "Bravo 1.0", "one failed shows only its version")
+        try expect(names([item("Bravo", .failed), item("Alpha", .updated)]) == "Alpha and Bravo", "updated first")
+        try expect(names([item("A", .updated), item("B", .updated), item("C", .skippedOpen)]) == "A, B and C", "three")
+        let five = names(["A", "B", "C", "D", "E"].map { item($0, .updated) })
+        try expect(five == "A, B, C and 2 more", "five: \(String(describing: five))")
+        let run = HistoryRun(startedAt: at3, finishedAt: at3, trigger: .updateAll, appsChecked: 9, updatesFound: 1, items: [item("DuckDuckGo", .updated)])
+        try expect(HistoryModel.accessibilityLabel(run, calendar: gmt).hasSuffix(". DuckDuckGo 1.0 → 2.0"), "VoiceOver names the app")
+    }
+}
+
 @MainActor func registerHistoryRenderChecks() {
     check("history screen: renders its days, runs and filters in light and dark, with no em dash") {
         let controller = makeController(outcomes: [])
@@ -364,7 +384,7 @@ private func item(_ name: String, _ result: HistoryItem.Result, id: String? = ni
                 .write(to: URL(fileURLWithPath: dir + "/history-expanded.png"))
         }
         let text = try paintedText(HistoryView(history: history, updates: controller))
-        for expected in ["Today", "Yesterday", "Scheduled", "1 updated, 1 failed", "Failures only", "All apps", "kept on this Mac"] {
+        for expected in ["Today", "Yesterday", "Scheduled", "1 updated, 1 failed", "Alpha and Bravo", "Failures only", "All apps", "kept on this Mac"] {
             try expect(text.contains(expected), "History text lacks \(expected): \(text)")
         }
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()

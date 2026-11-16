@@ -786,6 +786,7 @@ registerMacOSUpdateChecks()
 registerMacOSReminderChecks()
 registerHistoryChecks()
 registerHistoryScreenChecks()
+registerHistoryAppsLineChecks()
 registerHistoryRenderChecks()
 registerHistoryExportChecks()
 

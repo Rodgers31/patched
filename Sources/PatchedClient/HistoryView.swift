@@ -103,7 +103,33 @@ private typealias HistoryState<Value> = State<Value>
     /// What VoiceOver reads for a run's heading.
     public static func accessibilityLabel(_ run: HistoryRun, calendar: Calendar = .current, locale: Locale = .current) -> String {
         let failed = run.hasFailures ? String(localized: "Something failed. ") : ""
-        return failed + String(localized: "\(time(run.startedAt, calendar: calendar, locale: locale)), \(run.triggerText): \(run.summary)")
+        let apps = appsLine(run).map { ". " + $0 } ?? ""
+        return failed + String(localized: "\(time(run.startedAt, calendar: calendar, locale: locale)), \(run.triggerText): \(run.summary)") + apps
+    }
+
+    /// "1.0 → 2.0", or the one version known. nil when neither is.
+    public static func versions(_ item: HistoryItem) -> String? {
+        switch (item.oldVersion, item.newVersion) {
+        case let (old?, new?) where old != new: return "\(old) → \(new)"
+        case let (old?, _): return old
+        case let (nil, new?): return new
+        default: return nil
+        }
+    }
+
+    /// The apps in a run, shown under its summary so they can be seen without opening it. One app gets its
+    /// versions ("DuckDuckGo 1.215.1 → 1.216.0"); several are named, updated ones first, up to three and a count.
+    public static func appsLine(_ run: HistoryRun) -> String? {
+        if run.items.count == 1, let item = run.items.first {
+            return versions(item).map { "\(item.name) \($0)" } ?? item.name
+        }
+        let names = (run.items.filter { $0.result == .updated } + run.items.filter { $0.result != .updated }).map(\.name)
+        switch names.count {
+        case 0: return nil
+        case 2...3: return names.dropLast().joined(separator: ", ") + String(localized: " and ") + names[names.count - 1]
+        case 4...: return names.prefix(3).joined(separator: ", ") + String(localized: " and \(names.count - 3) more")
+        default: return names[0]
+        }
     }
 }
 
@@ -333,8 +359,13 @@ private struct HistoryRunRow: View {
                     .frame(minWidth: 52, alignment: .leading)
                 Text(verbatim: run.triggerText).font(.callout).foregroundStyle(.secondary)
                     .lineLimit(1).frame(minWidth: 90, alignment: .leading)
-                Text(verbatim: run.summary).font(.body).lineLimit(2).truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(verbatim: run.summary).font(.body).lineLimit(2).truncationMode(.tail)
+                    if let apps = HistoryModel.appsLine(run) {
+                        Text(verbatim: apps).font(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .contentShape(Rectangle())
             .onTapGesture { isExpanded.toggle() }
@@ -369,14 +400,7 @@ private struct HistoryRunRow: View {
 private struct HistoryItemRow: View {
     let item: HistoryItem
 
-    private var versions: String? {
-        switch (item.oldVersion, item.newVersion) {
-        case let (old?, new?) where old != new: return "\(old) → \(new)"
-        case let (old?, _): return old
-        case let (nil, new?): return new
-        default: return nil
-        }
-    }
+    private var versions: String? { HistoryModel.versions(item) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
