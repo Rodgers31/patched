@@ -287,7 +287,7 @@ private func item(_ name: String, _ result: HistoryItem.Result, id: String? = ni
                    && HistoryModel.accessibilityLabel(mixed, calendar: gmt).hasPrefix("Something failed."), "VoiceOver label")
     }
 
-    check("history menu: one 'Last run' line from memory, marked when something failed, that opens the run in History") {
+    check("history menu: a 'Last run' line only when something failed, marked, that opens the run in History") {
         let controller = makeController(outcomes: [outcome(app("Alpha"), .updateAvailable(offer("2.0")))])
         let session = NativeClientSession(navigation: ShellNavigation(destination: .updates), appUpdates: controller, urlOpener: RecordingOpener())
         try expect(!session.menuItems.contains { $0.id == "last-run" }, "a last-run line with no history")
@@ -295,10 +295,8 @@ private func item(_ name: String, _ result: HistoryItem.Result, id: String? = ni
         controller.history = store
         await runCheck(controller)
         await runOperation(controller) { _ = controller.updateAll() }
-        let line = session.menuItems.filter { $0.id == "last-run" }
-        guard line.count == 1, let run = controller.lastRun else { throw CheckFailure(description: "lines: \(line.count)") }
-        try expect(line[0].title.hasPrefix("Last run: today ") && line[0].title.hasSuffix(", 1 updated") && line[0].systemImage == nil
-                   && line[0].action == .showHistory(runID: run.id), "line: \(line[0])")
+        // A clean run adds nothing to the menu; History still has it.
+        try expect(controller.lastRun != nil && !session.menuItems.contains { $0.id == "last-run" }, "a last-run line for a clean run")
         let failing = HistoryRun(startedAt: at(15, 3), finishedAt: at(15, 3), trigger: .scheduled, appsChecked: 4, updatesFound: 2,
                                  items: [item("Alpha", .updated), item("Bravo", .failed)])
         try expect(HistoryModel.lastRunLine(failing, now: at(15, 12), calendar: gmt, locale: Locale(identifier: "en_GB"))
@@ -308,11 +306,22 @@ private func item(_ name: String, _ result: HistoryItem.Result, id: String? = ni
         let newest = HistoryRun(startedAt: later, finishedAt: later, trigger: .scheduled, appsChecked: 4, updatesFound: 2, items: failing.items)
         store.record(newest)
         controller.reloadHistory()
-        try expect(session.menuItems.first { $0.id == "last-run" }?.systemImage == "exclamationmark.triangle", "failure not marked")
+        let line = session.menuItems.filter { $0.id == "last-run" }
+        try expect(line.count == 1 && line[0].systemImage == "exclamationmark.triangle" && line[0].title.hasPrefix("Last run: ")
+                   && line[0].action == .showHistory(runID: newest.id), "failure line: \(line)")
+        // A run that waited and installed nothing is shown too, without the warning sign.
+        let waitedAt = later.addingTimeInterval(60)
+        let waited = HistoryRun(startedAt: waitedAt, finishedAt: waitedAt, trigger: .scheduled, appsChecked: 4, updatesFound: 2,
+                                outcome: .deferred, note: "on battery", items: [])
+        store.record(waited)
+        controller.reloadHistory()
+        let waitedLine = session.menuItems.filter { $0.id == "last-run" }
+        try expect(waitedLine.count == 1 && waitedLine[0].systemImage == nil && waitedLine[0].action == .showHistory(runID: waited.id),
+                   "waited line: \(waitedLine)")
         // Choosing it opens History at that run.
         try expect(session.showHistory(runID: newest.id) && session.navigation.destination == .history
                    && session.history.focusedRunID == newest.id && session.history.expanded.contains(newest.id)
-                   && session.history.runs.count == 2, "did not open History at the run")
+                   && session.history.runs.count == 3, "did not open History at the run")
     }
 
     check("history notification: the automatic summary names its run, and clicking it opens that run in History") {

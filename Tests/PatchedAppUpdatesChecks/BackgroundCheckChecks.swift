@@ -349,7 +349,7 @@ struct FakeNetworkDown: Error {}
         try expect(rows.first { $0.name == "Charlie" }?.recheckNote == nil, "note on a row that never needed the network")
         try expect(rig.controller.availableUpdateCount == 1 && rig.controller.canUpdate(rows.first { $0.name == "Alpha" }!), "badge or Update lost")
         let menu = rig.controller.menuUpdates()
-        try expect(menu.rows.map(\.name) == ["Alpha"] && menu.header == "1 update available" && menu.note == "Couldn't re-check 2 apps (offline)",
+        try expect(menu.rows.map(\.name) == ["Alpha"] && menu.header == "1 app update" && menu.note == "Couldn't re-check 2 apps (offline)",
                    "menu: \(menu.header) / \(menu.note ?? "-") / \(menu.rows.map(\.name))")
         try expect(rig.notifier.posted.count == 1, "re-notified for a kept status")
         // Back online with the same offer: still silent. A changed install on disk is not kept: it is refused.

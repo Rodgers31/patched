@@ -208,7 +208,7 @@ final class FakeVerifier: CodeVerifying, @unchecked Sendable {
         await runCheck(controller)
         await runOperation(controller) { controller.update(id: "/Fake/Admin.app") }   // learns that it needs admin rights
         let menu = controller.menuUpdates()
-        try expect(menu.header == "11 updates available", "header: \(menu.header)")
+        try expect(menu.header == "11 app updates", "header: \(menu.header)")
         // Ordinary updates by name, then the one that needs admin, then App Store; the cap cuts from the end.
         try expect(menu.rows.map(\.name) == ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"], "rows: \(menu.rows.map(\.name))")
         try expect(menu.moreCount == 3 && menu.rows.count == NativeClientMenuUpdates.rowCap, "cap: \(menu.rows.count) more \(menu.moreCount)")
@@ -225,12 +225,14 @@ final class FakeVerifier: CodeVerifying, @unchecked Sendable {
         await runCheck(controller)
         let quiet = controller.menuUpdates(timeFormatter: { _ in "10:42" })
         try expect(quiet.header == "Up to date" && quiet.checkedAt == "10:42" && quiet.rows.isEmpty, "header: \(quiet.header)")
+        try expect(quiet.statusLine == "Up to date · checked 10:42", "status: \(quiet.statusLine)")
         let gate = Gate()
         let slow = AppUpdatesController(scan: { [AppUpdateScannedApp(app: app("Done"), icon: nil)] },
                                         check: { apps in await gate.wait(); return [outcome(app("Done"), .upToDate)] },
                                         recheck: { _ in nil }, installer: FakeInstaller())
         slow.check()
         try expect(slow.menuUpdates().header == "Checking…", "header: \(slow.menuUpdates().header)")
+        try expect(slow.menuUpdates().statusLine == "Checking…", "a check time while checking: \(slow.menuUpdates().statusLine)")
         gate.open(); await slow.waitUntilIdle()
     }
 
@@ -242,6 +244,7 @@ final class FakeVerifier: CodeVerifying, @unchecked Sendable {
         await runCheck(allFailed)
         let failed = allFailed.menuUpdates(timeFormatter: clock)
         try expect(failed.header == "Couldn't check 2 apps" && failed.checkedAt == "10:42" && failed.rows.isEmpty, "all failed: \(failed.header)")
+        try expect(failed.statusLine == "Couldn't check 2 apps", "a check time after a failed check: \(failed.statusLine)")
         // Some failed, the rest up to date or without a source.
         let some = makeController(outcomes: [outcome(app("Alpha"), .refused(down)), outcome(app("Bravo"), .upToDate), outcome(app("Echo"), .noSource, noSource: true)])
         await runCheck(some)
@@ -256,7 +259,7 @@ final class FakeVerifier: CodeVerifying, @unchecked Sendable {
             outcome(app("Charlie"), .updateAvailable(offer("3.0", source: .homebrewCask(token: "charlie"))), source: .homebrewCask(token: "charlie"), low: true)])
         await runCheck(mixed)
         let menu = mixed.menuUpdates(timeFormatter: clock)
-        try expect(menu.header == "3 updates available" && menu.note == "Couldn't check 1 app" && menu.checkedAt == "10:42", "mixed: \(menu.header) / \(String(describing: menu.note))")
+        try expect(menu.header == "3 app updates" && menu.note == "Couldn't check 1 app" && menu.checkedAt == "10:42", "mixed: \(menu.header) / \(String(describing: menu.note))")
         try expect(menu.rows.map(\.name) == ["Bravo", "Charlie", "Delta"] && menu.rows[0].note == nil
                    && menu.rows[1].note == "Unconfirmed" && menu.rows[2].note == "Installer package", "rows: \(menu.rows)")
         // The catalogue is unreadable and nothing has been checked.
@@ -312,8 +315,11 @@ final class FakeVerifier: CodeVerifying, @unchecked Sendable {
         await runCheck(controller)
         let session = NativeClientSession(navigation: ShellNavigation(destination: .support), appUpdates: controller, urlOpener: RecordingOpener())
         let items = session.menuItems
-        try expect(items.first?.kind == .text && items.first?.title == "10 updates available", "header: \(String(describing: items.first))")
-        try expect(items.contains { $0.kind == .text && $0.title.hasPrefix("Checked ") }, "no checked time")
+        // One status line: the count and the check time together.
+        try expect(items.first?.kind == .text && items.first?.title.hasPrefix("10 app updates · checked ") == true,
+                   "header: \(String(describing: items.first))")
+        try expect(!items.contains { $0.kind == .text && $0.title.hasPrefix("Checked ") }, "a separate checked line")
+        try expect(!items.contains { $0.id == "uninstall" || $0.id == "update-all-detail" }, "items: \(items.map(\.id))")
         let rows = items.filter { if case .showUpdate? = $0.action { return true }; return false }
         try expect(rows.count == NativeClientMenuUpdates.rowCap && rows[0].title == "App0  1.0 → 2.0" && rows[0].iconPath == "/Fake/App0.app"
                    && rows[0].action == .showUpdate(id: "/Fake/App0.app"), "rows: \(rows.map(\.title))")

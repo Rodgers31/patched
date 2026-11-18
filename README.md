@@ -153,9 +153,9 @@ Update All, single app updates and `patched update` on the command line. A sched
 found nothing to install is listed as "Checked 12 apps, all up to date", and one that had to
 wait says why. Open a run to see each app's old and new version, the result and the same
 message the Updates screen showed. **Failures only** and the app picker narrow the list. The
-menu bar menu shows the last run, for example "Last run: today 03:00, 3 updated", with a
-warning sign when something failed, and the notification after an automatic run opens that
-run in History.
+menu bar menu shows the last run only when something failed (with a warning sign, for example
+"Last run: today 03:00, 1 updated, 1 failed") or the run waited and installed nothing, and the
+notification after an automatic run opens that run in History.
 
 The history stays on your Mac, in `~/Library/Application Support/Patched/history.json`. It is
 never sent anywhere. Patched keeps 90 days or the last 500 runs, whichever is smaller, and
@@ -285,7 +285,8 @@ Dragging Patched to the Trash leaves its data behind on purpose. The most import
 part is the rollback backups: the previous version of each app Patched has updated,
 which can add up to several gigabytes and may be the only copy of that version.
 
-From 0.2.3 the easiest way is **Uninstall Patched…** in Patched's menu. It turns off
+The easiest way is **Uninstall Patched…** in Patched's Settings (in the menu bar menu
+in earlier versions). It turns off
 Open at login, removes Patched's data, moves Patched to the Trash and quits. It asks
 whether to keep the backups (they stay in
 `~/Library/Application Support/Patched/Updater/backups`, so a reinstalled Patched can

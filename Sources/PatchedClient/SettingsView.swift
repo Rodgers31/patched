@@ -52,17 +52,21 @@ public struct SettingsView: View {
     @ObservedObject private var macOSReminders: MacOSReminderSettings
     private let openNotificationSettings: () -> Void
     private let version: String?
+    /// "Uninstall Patched…": asks in an alert, then removes Patched's files and the app. Nil hides the section.
+    private let startUninstall: (() -> Void)?
 
     public init(openAtLogin: OpenAtLoginController, notifications: NotificationStatusController,
                 automaticUpdates: AutomaticUpdateSettings,
                 macOSReminders: MacOSReminderSettings = MacOSReminderSettings(store: MemoryMacOSReminderStore()),
-                version: String?, openNotificationSettings: @escaping () -> Void) {
+                version: String?, openNotificationSettings: @escaping () -> Void,
+                startUninstall: (() -> Void)? = nil) {
         self.automaticUpdates = automaticUpdates
         self.macOSReminders = macOSReminders
         self.openAtLogin = openAtLogin
         self.notifications = notifications
         self.version = version
         self.openNotificationSettings = openNotificationSettings
+        self.startUninstall = startUninstall
     }
 
     public var body: some View {
@@ -102,9 +106,16 @@ public struct SettingsView: View {
                 Text(verbatim: notifications.statusText).fixedSize(horizontal: false, vertical: true)
                 Button(action: openNotificationSettings) { Text("Open Notification Settings") }
             }
-            if let version {
+            if version != nil || startUninstall != nil {
                 Section {
-                    LabeledContent { Text(verbatim: version).textSelection(.enabled) } label: { Text("Version") }
+                    if let version {
+                        LabeledContent { Text(verbatim: version).textSelection(.enabled) } label: { Text("Version") }
+                    }
+                    if let startUninstall {
+                        // Lives here rather than the menu bar menu, away from everyday commands.
+                        Button(action: startUninstall) { Text("Uninstall Patched…") }
+                            .disabled(!runsFromAppBundle)
+                    }
                 }
             }
         }
@@ -136,7 +147,8 @@ public struct NativeClientSettingsView: View {
     public var body: some View {
         SettingsView(openAtLogin: session.openAtLogin, notifications: session.notificationStatus,
                      automaticUpdates: session.automaticUpdates, macOSReminders: session.macOSReminders,
-                     version: NativeClientSession.appVersion, openNotificationSettings: { session.openNotificationSettings() })
+                     version: NativeClientSession.appVersion, openNotificationSettings: { session.openNotificationSettings() },
+                     startUninstall: { Task { await UninstallFlow.system().run() } })
             .frame(width: 460)
             .fixedSize(horizontal: false, vertical: true)
     }

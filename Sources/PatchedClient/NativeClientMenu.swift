@@ -36,6 +36,13 @@ public struct NativeClientMenuUpdates: Equatable, Sendable {
     /// and an Update button when the release can be installed (`selfUpdateInstallable`).
     public var selfUpdateText: String? = nil
     public var selfUpdateInstallable = false
+    /// The menu's one status line: the header, plus " · checked 10:42" only for a settled result, never
+    /// while checking or after a check that failed.
+    public var statusLine: String {
+        guard let checkedAt, timeFits else { return header }
+        return header + String(localized: " · checked \(checkedAt)")
+    }
+    var timeFits = false
 }
 
 extension AppUpdatesController {
@@ -65,7 +72,8 @@ extension AppUpdatesController {
         var note: String?
         if phase == .checking { header = String(localized: "Checking…") }
         else if !waiting.isEmpty {
-            header = NativeClientMenuLabel.badgeDescription(waiting.count)
+            // Apps only: the macOS line, listed above them, is counted on its own.
+            header = waiting.count == 1 ? String(localized: "1 app update") : String(localized: "\(waiting.count) app updates")
             if failed > 0 {
                 note = failed == 1 ? String(localized: "Couldn't check \(failed) app") : String(localized: "Couldn't check \(failed) apps")
             } else if keptOffline > 0 {
@@ -81,12 +89,14 @@ extension AppUpdatesController {
         else if stale > 0 { header = String(localized: "Check again to confirm") }
         else if hasChecked { header = String(localized: "Up to date") }
         else { header = String(localized: "No update check yet") }
+        // The check time belongs only beside a result the check settled.
+        let timeFits = phase != .checking && (!waiting.isEmpty || (failed == 0 && catalogueError == nil && keptOffline == 0))
         let shown = ordered.prefix(max(0, cap)).map {
             NativeClientMenuUpdates.Row(id: $0.id, name: $0.name, versions: Self.menuVersions($0), note: $0.kindNote)
         }
         return NativeClientMenuUpdates(header: header, checkedAt: checkedTime, note: note, rows: Array(shown),
                                        moreCount: max(0, ordered.count - shown.count), selfUpdateText: selfUpdate?.text,
-                                       selfUpdateInstallable: canInstallSelfUpdate)
+                                       selfUpdateInstallable: canInstallSelfUpdate, timeFits: timeFits)
     }
 
     /// Display versions only, from the row's structured fields: "139.0 → 139.0.6053.38" rather than
@@ -240,8 +250,6 @@ public struct NativeClientMenuItem: Equatable, Identifiable, Sendable {
         case openUpdates
         case updateAll, stopUpdating, cancelQueuedUpdateAll
         case checkNow, settings, quit
-        /// "Uninstall Patched…": asks in an alert, then removes Patched's files and the app.
-        case uninstall
         /// "Update Patched to X…": asks first, in an alert, and installs only once that is confirmed.
         case updatePatched
         case downloadPatched
@@ -279,11 +287,12 @@ extension NativeClientSession {
         }
         func separator(_ id: String) { items.append(NativeClientMenuItem(id: id, kind: .separator, title: "")) }
 
-        text("header", list.header)
-        if let checked = list.checkedAt { text("checked", String(localized: "Checked \(checked)")) }
+        // One status line: "3 app updates · checked 10:42".
+        text("header", list.statusLine)
         if let note = list.note { text("note", note) }
-        // The newest recorded run, from memory: opening the menu reads no files. Marked when something failed.
-        if let run = updates.lastRun {
+        // The newest recorded run, from memory: opening the menu reads no files. Only when something failed or
+        // the run waited and installed nothing; the rows already say which apps are waiting, and History has every run.
+        if let run = updates.lastRun, run.hasFailures || run.outcome == .deferred {
             command("last-run", HistoryModel.lastRunLine(run), .showHistory(runID: run.id),
                     systemImage: run.hasFailures ? "exclamationmark.triangle" : nil)
         }
@@ -301,7 +310,7 @@ extension NativeClientSession {
         let macOS = updates.macOSNotice
         if !list.rows.isEmpty || all.visible || macOS != nil { separator("updates-separator") }
         // Listed like an update, first, but it never counts towards Update All.
-        if let macOS { command("row:" + MacOSUpdateNotice.rowID, macOS.menuTitle, .showMacOSUpdate) }
+        if let macOS { command("row:" + MacOSUpdateNotice.rowID, macOS.menuTitle, .showMacOSUpdate, iconPath: MacOSUpdateNotice.iconPath) }
         for row in list.rows {
             command("row:" + row.id, row.name + "  " + row.versions + (row.note.map { " — " + $0 } ?? ""),
                     .showUpdate(id: row.id), iconPath: row.path)
@@ -314,8 +323,8 @@ extension NativeClientSession {
             } else if all.showsStop {
                 command("update-all-stop", String(localized: "Stop Updating"), .stopUpdating, enabled: all.stopEnabled)
             } else {
+                // The rows already mark App Store updates, so no "1 here, 1 via the App Store" line.
                 command("update-all", all.title, .updateAll, enabled: all.enabled)
-                if let detail = all.detail { text("update-all-detail", detail) }
                 if let reason = all.reason { text("update-all-reason", reason) }
             }
         }
@@ -323,10 +332,10 @@ extension NativeClientSession {
         command("open", String(localized: "Open Patched"), .openUpdates)
         command("check", String(localized: "Check Now"), .checkNow, enabled: updates.canCheck, shortcut: "r")
         command("settings", String(localized: "Settings…"), .settings, shortcut: ",")
-        command("uninstall", String(localized: "Uninstall Patched…"), .uninstall, enabled: runsFromAppBundle)
         separator("quit-separator")
         command("quit", String(localized: "Quit Patched"), .quit, shortcut: "q")
-        text("background", menuText.backgroundStatus)
+        // The schedule is explained in Settings; the menu only says when background checks are not running.
+        if !backgroundChecksRunning { text("background", menuText.backgroundStatus) }
         return items
     }
 
@@ -351,19 +360,16 @@ public struct NativeClientMenuView: View {
     private let openWindow: () -> Void
     private let openSettings: () -> Void
     private let confirmSelfUpdate: @MainActor (String) -> Bool
-    private let startUninstall: @MainActor () -> Void
 
     /// `openSettings` shows the standard Settings window; the app supplies it from its scene environment.
     /// `confirmSelfUpdate` asks before Patched updates itself; by default an alert whose default button is Cancel.
     public init(session: NativeClientSession, openWindow: @escaping () -> Void, openSettings: @escaping () -> Void = {},
-                confirmSelfUpdate: @escaping @MainActor (String) -> Bool = NativeClientMenuView.askInAlert,
-                startUninstall: @escaping @MainActor () -> Void = { Task { await UninstallFlow.system().run() } }) {
+                confirmSelfUpdate: @escaping @MainActor (String) -> Bool = NativeClientMenuView.askInAlert) {
         self.session = session
         self.updates = session.appUpdates
         self.openWindow = openWindow
         self.openSettings = openSettings
         self.confirmSelfUpdate = confirmSelfUpdate
-        self.startUninstall = startUninstall
     }
 
     public var body: some View {
@@ -395,7 +401,9 @@ public struct NativeClientMenuView: View {
     /// app symbol. Memory only, so opening the menu reads no files.
     private func menuIcon(_ path: String) -> NSImage {
         let source: NSImage?
-        if let cached = updates.iconProvider.cachedIcon(forPath: path) {
+        if path == MacOSUpdateNotice.iconPath {
+            source = MacOSUpdateNotice.icon
+        } else if let cached = updates.iconProvider.cachedIcon(forPath: path) {
             source = cached
         } else if let pixels = updates.row(id: path)?.icon?.cgImage {
             source = NSImage(cgImage: pixels, size: NSSize(width: 32, height: 32))
@@ -418,7 +426,6 @@ public struct NativeClientMenuView: View {
         case .checkNow: session.performMenuAction(.checkNow)
         case .settings: openSettings()
         case .quit: NSApplication.shared.terminate(nil)
-        case .uninstall: startUninstall()
         case .updatePatched: session.requestSelfUpdateFromMenu(confirm: confirmSelfUpdate)
         case .downloadPatched: updates.downloadSelfUpdate()
         case .dismissPatchedFailure: updates.cancelSelfUpdate()

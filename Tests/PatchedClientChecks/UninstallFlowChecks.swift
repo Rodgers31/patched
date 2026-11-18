@@ -80,17 +80,13 @@ private final class UninstallLog: @unchecked Sendable {
         try expect(rig.exists(rig.library + "/Logs/Patched/check.log") && rig.exists(rig.app) && rig.exists(rig.backups), "something was removed")
     }
 
-    check("uninstall flow: the menu item opens the flow, and with a blocked plan only the blocked alert appears") {
+    check("uninstall flow: lives in Settings, not the menu, and with a blocked plan only the blocked alert appears") {
         let rig = try UninstallRig(choice: .deleteBackups, unfinished: true)
         let session = NativeClientSession(navigation: ShellNavigation(destination: .support))
-        let item = session.menuItems.first { $0.id == "uninstall" }
-        try expect(item?.title == "Uninstall Patched…" && item?.action == .uninstall, "no menu item: \(session.menuItems.map(\.id))")
-        let ids = session.menuItems.map(\.id)
-        try expect(ids.firstIndex(of: "settings")! < ids.firstIndex(of: "uninstall")! && ids.firstIndex(of: "uninstall")! < ids.firstIndex(of: "quit")!, "item order \(ids)")
-        let flow = rig.flow!
-        var started: Task<UninstallFlow.Outcome, Never>?
-        NativeClientMenuView(session: session, openWindow: {}, startUninstall: { started = Task { await flow.run() } }).perform(.uninstall)
-        _ = await started?.value
+        try expect(!session.menuItems.contains { $0.id == "uninstall" || $0.title.hasPrefix("Uninstall") }, "menu item: \(session.menuItems.map(\.id))")
+        let settings = try source("Sources/PatchedClient/SettingsView.swift")
+        try expect(settings.contains("Text(\"Uninstall Patched…\")") && settings.contains("UninstallFlow.system().run()"), "no Settings button")
+        _ = await rig.flow!.run()
         try expect(rig.log.events.filter { $0.hasPrefix("tell:") }.count == 1, "events: \(rig.log.events)")
         try expect(!rig.log.events.contains("unregister") && !rig.log.events.contains("quit") && rig.exists(rig.app), "acted on a blocked plan")
     }

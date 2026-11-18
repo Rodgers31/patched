@@ -281,8 +281,8 @@ private struct MacOSUpdateRowView: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            Image(systemName: "laptopcomputer").font(.system(size: 26)).frame(width: 40, height: 40)
-                .foregroundStyle(notice.isMajor ? Color.secondary : BrandAccent.color).accessibilityHidden(true)
+            Image(nsImage: MacOSUpdateNotice.icon).resizable().frame(width: 40, height: 40)
+                .opacity(notice.isMajor ? 0.6 : 1).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     if notice.isMajor {
@@ -303,14 +303,15 @@ private struct MacOSUpdateRowView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            VStack(alignment: .trailing, spacing: 6) {
-                Button(action: { Task { await controller.openSoftwareUpdate() } }) { Text("Open Software Update") }
-                    .borderedButton(prominent: !notice.isMajor)
-                    .accessibilityLabel(Text("Open Software Update in System Settings"))
+            Button(action: { Task { await controller.openSoftwareUpdate() } }) { Text("Open Software Update") }
+                .borderedButton(prominent: !notice.isMajor)
+                .accessibilityLabel(Text("Open Software Update in System Settings"))
+            // Not now sits in the same … menu as the app rows' Hide, so this row's button lines up with theirs.
+            Menu {
                 Button(action: { controller.hideMacOSUpdate() }) { Text("Not now") }
-                    .buttonStyle(.borderless)
                     .accessibilityLabel(Text("Hide the macOS update until the next version"))
-            }
+            } label: { Image(systemName: "ellipsis.circle").accessibilityLabel(Text("More actions for macOS")) }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
         }
         .padding(.vertical, 10)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous)

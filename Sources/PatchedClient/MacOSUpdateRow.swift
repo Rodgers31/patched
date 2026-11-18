@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import AppKit
 import UpdateSources
 
 // The pinned macOS row. Patched shows the macOS update and opens System Settings › Software Update on a click;
@@ -20,6 +21,10 @@ public enum SoftwareUpdateLinks {
 /// What the macOS row (and its menu item) shows: the minor update when there is one, otherwise a newer major.
 public struct MacOSUpdateNotice: Equatable, Sendable {
     public static let rowID = "im.patched.macos"
+    /// System Settings, where Software Update lives: its icon stands for macOS in the menu and the Updates window.
+    public static let iconPath = "/System/Applications/System Settings.app"
+    /// Read once, on first use, then kept; later menu openings read no files.
+    @MainActor public static let icon: NSImage = NSWorkspace.shared.icon(forFile: iconPath)
     public let update: MacOSUpdate
     public let runningVersion: String
     /// A newer major is also available alongside the minor update this notice is about.
