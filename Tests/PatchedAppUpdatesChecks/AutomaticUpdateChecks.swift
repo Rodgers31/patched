@@ -157,11 +157,11 @@ private struct FakeManaged: ManagedPreferenceReading {
 
     check("automatic: installs only what Update All installs, with no Patched, installer package, hidden, App Store or admin app") {
         let patchedItself = app("Patched", id: NoSourceReason.patchedBundleID)
-        let pkg = app("Pkgy"), admin = app("Admin"), store = storeApp("Store")
+        let pkg = app("Pkgy"), admin = app("Admin"), store = storeApp("Store"), chrome = chromeApp()
         let hidden = app("Hidden", id: "com.vendor.hidden"), hiddenCopy = app("HiddenCopy", id: "com.vendor.hidden")
         let installer = FakeInstaller()
         installer.updateHandler = { outcome, _ in
-            if outcome.app.name == "Admin" { throw InstallRefusal.needsAdmin("root-owned") }
+            if outcome.app.name == "Admin" || outcome.app.name == "Google Chrome" { throw InstallRefusal.needsAdmin("root-owned") }
             return AppUpdateReport(status: "installed", fromVersion: "1.0", toVersion: "2.0", backupFolder: "/b")
         }
         let ignoredOutcome = AppCheckOutcome(app: hidden, teamID: nil, source: nil, lowConfidence: false, installable: false,
@@ -172,15 +172,19 @@ private struct FakeManaged: ManagedPreferenceReading {
                            outcome(patchedItself, .updateAvailable(offer("9.0"))),
                            outcome(pkg, .updateAvailable(offer("2.0", format: .pkg))),
                            storeOutcome(store), outcome(admin, .updateAvailable(offer("2.0"))),
+                           chromeOutcome(chrome, .updateAvailable(offer("2.0"))),
                            ignoredOutcome, outcome(hiddenCopy, .updateAvailable(offer("2.0")))],
                           now: at(11, 2, 0), settings: s, summaries: summaries, installer: installer, packageUpdates: true)
         rig.scheduler.start(); await rig.settle()
         // Admin is only found out when the install is refused; nothing else may be tried.
-        try expect(installs(rig) == ["update Admin quit=false", "update Alpha quit=false"], "tried to install: \(installs(rig))")
+        // Chrome has a developer package route, but the automatic run never passes consent: it is refused like Admin.
+        try expect(installs(rig) == ["update Admin quit=false", "update Alpha quit=false", "update Google Chrome quit=false"],
+                   "tried to install: \(installs(rig))")
         try expect(adminEvents(rig.installer).isEmpty, "admin consent reached the installer: \(adminEvents(rig.installer))")
         try expect(rig.opener.nothingOpened, "the App Store (or anything else) was opened: \(rig.opener.urls) \(rig.opener.apps)")
         try expect(summaries.automatic.first?.appStore == 0 && summaries.automatic.first?.updated == 1, "summary: \(summaries.automatic)")
         try expect(rig.controller.rows.first { $0.name == "Pkgy" }?.privilege == .installer, "the installer row was not an installer row")
+        try expect(rig.controller.rows.first { $0.name == "Google Chrome" }?.privilege == .vendorPackage, "Chrome not offered as Update…")
     }
 
     check("automatic: an App Store update alone does not open the App Store or install") {

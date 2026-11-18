@@ -178,6 +178,27 @@ func backupsFolder(_ box: Sandbox) -> [String] {
 }
 
 func registerAdminChecks() {
+    check("likelyNeedsAdmin: only a foreign owner, an unwritable bundle or an unwritable folder says yes; nothing is written") {
+        let root = NSTemporaryDirectory() + "likely-admin-\(UUID().uuidString)"
+        defer { chmod(root + "/Locked", 0o755); try? FileManager.default.removeItem(atPath: root) }
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: root + "/Open/Mine.app", withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: root + "/Locked/Mine.app", withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: root + "/Open/Ro.app", withIntermediateDirectories: true)
+        let me = geteuid()
+        try expect(!UpdateInstaller.likelyNeedsAdmin(appPath: root + "/Open/Mine.app", uid: me), "user-owned app in a writable folder")
+        try expect(UpdateInstaller.likelyNeedsAdmin(appPath: root + "/Open/Mine.app", uid: me &+ 1), "another owner")
+        chmod(root + "/Open/Ro.app", 0o555)
+        try expect(UpdateInstaller.likelyNeedsAdmin(appPath: root + "/Open/Ro.app", uid: me), "bundle not writable by its owner")
+        chmod(root + "/Open/Ro.app", 0o755)
+        chmod(root + "/Locked", 0o555)
+        try expect(UpdateInstaller.likelyNeedsAdmin(appPath: root + "/Locked/Mine.app", uid: me), "folder not writable")
+        try expect(!UpdateInstaller.likelyNeedsAdmin(appPath: root + "/Open/Missing.app", uid: me), "missing path")
+        // A symlink is never followed: it is not a directory itself.
+        try fm.createSymbolicLink(atPath: root + "/Open/Link.app", withDestinationPath: root + "/Open/Mine.app")
+        try expect(!UpdateInstaller.likelyNeedsAdmin(appPath: root + "/Open/Link.app", uid: me &+ 1), "symlink followed")
+    }
+
     // MARK: Flag
 
     check("admin flag: only PATCHED_ENABLE_ADMIN_UPDATES=1 turns it on") {

@@ -168,8 +168,13 @@ private struct AppUpdateRowView: View {
                     Text(verbatim: AppUpdateRow.needsAdminCaption).font(.footnote).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                // The caption above already says why; only a failure to open the app adds to it.
-                if let result = row.result, !(row.needsManualAdmin && result.kind == .info) {
+                // How a developer package row installs, or the one-time fix for an app Patched can't replace.
+                if let help = row.adminHelpText {
+                    Text(verbatim: help).font(.footnote).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // The captions above already say why; only a failure adds to them.
+                if let result = row.result, !((row.needsManualAdmin || row.privilege == .vendorPackage) && result.kind == .info) {
                     Text(verbatim: result.text).font(.footnote)
                         .foregroundStyle(result.kind == .failure ? Color.red : (result.kind == .success ? Color.green : Color.secondary))
                         .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)

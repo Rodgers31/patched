@@ -374,6 +374,20 @@ your own password. Roll back isn't supported after a `.pkg` update, because a
 package can install more than the app. Set `PATCHED_ENABLE_PKG_UPDATES=0` to
 turn `.pkg` updates off.
 
+Some apps end up owned by the system rather than by you, for example Google Chrome
+after it offers to update for all users, or an app installed by your organisation.
+Patched can't replace those, so their row says **Needs admin**. For a few of them the
+developer publishes a signed installer package (today only Google Chrome). Their row
+then has an **Update…** button instead: Patched downloads the developer's package,
+checks it like any other `.pkg` (the installed app's Team ID, notarised) and checks
+that it contains the version on offer or newer, then opens Apple's Installer, which
+asks for your password. This happens only when you click that one app's Update… (or
+type `patched update <app>`), never in Update All, automatic updates or a
+notification, and `patched check` says when it is available. For any other app that
+needs admin, the row explains the one-time fix: replace the app once with a copy
+downloaded from its developer, and Patched can update it without a password from
+then on.
+
 ## What update verification checks
 
 For an update, Patched uses the installed app's signed Team ID as its identity

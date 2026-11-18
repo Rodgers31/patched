@@ -39,7 +39,7 @@ public enum PlainRefusalText {
             return String(localized: "The download for \(app) was larger than Patched allows, so nothing was changed.")
         case .unpackFailed:
             return String(localized: "Patched couldn't open the download for \(app). Nothing was changed.")
-        case .versionMismatch, .notNewer, .bundleNotFound, .ambiguousBundle:
+        case .versionMismatch, .notNewer, .bundleNotFound, .ambiguousBundle, .packageVersionMismatch:
             return String(localized: "The download wasn't the update Patched expected for \(app), so nothing was changed.")
         case .appStoreManaged:
             return String(localized: "\(app) comes from the App Store. Update it there.")

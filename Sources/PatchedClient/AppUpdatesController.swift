@@ -164,6 +164,9 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
         case admin
         /// A `.pkg` handed to Apple's Installer.
         case installer
+        /// The app is owned by the system, so Patched cannot replace it, but its developer publishes a signed
+        /// installer package (`VendorPackages`): Apple's Installer installs that instead and asks for the password.
+        case vendorPackage
     }
     public enum ResultKind: Equatable, Sendable { case success, info, failure }
     public struct Result: Equatable, Sendable {
@@ -266,6 +269,8 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
         case .standard: return String(localized: "Update")
         case .admin: return String(localized: "Update (admin)")
         case .installer: return String(localized: "Update (installer)")
+        // The ellipsis: Apple's Installer window and a password prompt follow.
+        case .vendorPackage: return String(localized: "Update…")
         }
     }
     public var canRollBack: Bool { rollbackVersion != nil }
@@ -285,11 +290,23 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
             case nil: return String(localized: "Unconfirmed")
             }
         }
-        if needsManualAdmin || privilege == .admin { return String(localized: "Needs admin") }
+        if needsManualAdmin || privilege == .admin || privilege == .vendorPackage { return String(localized: "Needs admin") }
         return nil
     }
     public var openAppActionTitle: String { String(localized: "Open \(name)") }
     public static let needsAdminCaption = String(localized: "Needs admin rights. Open the app and use its own updater.")
+    /// The secondary line on a row that updates through the developer's installer package.
+    public static let vendorPackageCaption = String(localized: "Opens Apple's Installer, which asks for your password.")
+    /// The one-time fix for a needs-admin row with no developer package route.
+    public static let needsAdminHelp = String(localized: "Patched can't replace apps owned by the system. Replacing it once with a copy downloaded from the developer lets Patched update it without a password.")
+    /// The row's extra secondary line about admin rights: how a routed row installs, or the one-time fix for one
+    /// Patched cannot update. nil for every other row.
+    public var adminHelpText: String? {
+        guard status == .updateAvailable else { return nil }
+        if privilege == .vendorPackage { return Self.vendorPackageCaption }
+        if needsManualAdmin { return Self.needsAdminHelp }
+        return nil
+    }
 
     public var statusText: String {
         switch status {
@@ -300,6 +317,7 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
             case .standard: return String(localized: "Update available")
             case .admin: return String(localized: "Update available. Needs admin rights: macOS asks for your password for this update.")
             case .installer: return String(localized: "Update available as an installer package. Apple's Installer will open and ask for your password.")
+            case .vendorPackage: return String(localized: "Update available. Needs admin rights.")
             }
         case .notInstallable:
             if let block = outcome?.edSignatureBlock { return block.message }
@@ -588,6 +606,13 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     private var cancellablePath: String?
     /// Apps that refused with needs_admin; their rows offer String(localized: "Update (admin)") from then on.
     private var needsAdminPaths: Set<String> = []
+    /// The subset of `needsAdminPaths` put there only by the early ownership test, never by a refused install.
+    /// Only these are dropped again when the early test later passes (the user fixed the ownership); an entry
+    /// learned from a real refusal stays, as before.
+    private var earlyAdminPaths: Set<String> = []
+    /// Cheap read-only "would Patched be unable to replace this itself?" test, injectable so fixtures never stat real folders.
+    private let likelyNeedsAdmin: @Sendable (String) -> Bool
+    private func markNeedsAdmin(_ path: String) { needsAdminPaths.insert(path); earlyAdminPaths.remove(path) }
     /// The one admin action in progress, so Done can reach it.
     private var currentAdmin: AdminInteraction?
     private var adminToken: UUID?
@@ -602,7 +627,9 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
 
     public init(scan: @escaping AppUpdateScan, check: @escaping AppUpdateCheck, recheck: @escaping AppUpdateRecheck,
                 catalogue: @escaping AppUpdateCatalogueProbe = { nil }, editCatalogue: AppUpdateCatalogueEdit? = nil,
-                installer: any AppUpdateInstalling, adminUpdates: Bool = false, packageUpdates: Bool = false) {
+                installer: any AppUpdateInstalling, adminUpdates: Bool = false, packageUpdates: Bool = false,
+                likelyNeedsAdmin: @escaping @Sendable (String) -> Bool = { UpdateInstaller.likelyNeedsAdmin(appPath: $0) }) {
+        self.likelyNeedsAdmin = likelyNeedsAdmin
         scanApps = scan; checkApps = check; recheckApp = recheck; probeCatalogue = catalogue; self.installer = installer
         self.editCatalogue = editCatalogue
         adminUpdatesEnabled = adminUpdates
@@ -1417,7 +1444,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         switch row.privilege {
         case .standard: return false
         case .admin: return adminUpdatesEnabled
-        case .installer: return packageUpdatesEnabled
+        case .installer, .vendorPackage: return packageUpdatesEnabled
         }
     }
 
@@ -1624,16 +1651,23 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             if case .needsAdmin = refusal, interaction == nil {
                 // Needs admin rights whether or not the experimental admin path is on; only with it on does
                 // the row offer String(localized: "Update (admin)").
-                if adminUpdatesEnabled {
-                    needsAdminPaths.insert(path)
+                let format: ArtifactFormat? = { if case .updateAvailable(let offer) = outcome.result { return offer.format }; return nil }()
+                if Self.hasVendorPackage(outcome, format: format, packageUpdates: packageUpdatesEnabled) {
+                    // The developer's own package can do it through Apple's Installer: the row offers Update….
+                    markNeedsAdmin(path)
+                    mutate(path) {
+                        $0.activity = .idle; $0.privilege = .vendorPackage; $0.needsManualAdmin = false
+                        $0.result = .init(kind: .info, text: String(localized: "\(name) needs admin rights. Choose Update…; Apple's Installer opens and asks for your password."))
+                    }
+                } else if adminUpdatesEnabled {
+                    markNeedsAdmin(path)
                     mutate(path) {
                         $0.activity = .idle; $0.privilege = .admin
                         $0.result = .init(kind: .info, text: String(localized: "\(name) needs admin rights. Choose Update (admin); macOS asks for your password for this one update."))
                     }
                 } else {
                     // Patched cannot do this one. Remember it, so the row offers Open <app> from now on.
-                    needsAdminPaths.insert(path)
-                    let format: ArtifactFormat? = { if case .updateAvailable(let offer) = outcome.result { return offer.format }; return nil }()
+                    markNeedsAdmin(path)
                     let result = Self.refusalResult(name: name, refusal, format: format)
                     mutate(path) { $0.activity = .idle; $0.needsManualAdmin = true; $0.result = result }
                 }
@@ -1877,10 +1911,33 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
 
     /// `makeRow` with this controller's admin setting and the apps already known to need admin rights.
     private func makeRow(_ outcome: AppCheckOutcome, icon: LocalInstalledIcon?) -> AppUpdateRow {
+        learnAdminEarly(outcome)
         var row = Self.makeRow(outcome, icon: icon, adminUpdates: adminUpdatesEnabled, packageUpdates: packageUpdatesEnabled,
                                needsAdmin: needsAdminPaths.contains(outcome.app.path))
         if outcome.noSourceReason == .thisApp { row.selfUpdateVersion = selfUpdate?.version }
         return row
+    }
+
+    /// For an installable zip/dmg update offer, treats a bundle Patched could not replace itself exactly as if an
+    /// install had been refused needs_admin, so the row is right before any attempt. A passing test removes only
+    /// what this test added, so a refusal-learned entry is kept.
+    private func learnAdminEarly(_ outcome: AppCheckOutcome) {
+        guard case .updateAvailable(let offer) = outcome.result, !outcome.isAppStoreUpdate, outcome.installable,
+              offer.format != .pkg else { return }
+        let path = outcome.app.path
+        if likelyNeedsAdmin(path) {
+            if !needsAdminPaths.contains(path) { needsAdminPaths.insert(path); earlyAdminPaths.insert(path) }
+        } else if earlyAdminPaths.remove(path) != nil {
+            needsAdminPaths.remove(path)
+        }
+    }
+
+    /// A developer installer package route applies: installer packages are on, the download is not a package
+    /// already, and the app is listed in `VendorPackages` at the package's install path with the developer's Team ID.
+    /// Only ever used for an app known to need admin rights.
+    nonisolated static func hasVendorPackage(_ outcome: AppCheckOutcome, format: ArtifactFormat?, packageUpdates: Bool) -> Bool {
+        packageUpdates && format != .pkg
+            && VendorPackages.route(forBundleID: outcome.app.bundleID, appPath: outcome.app.path, teamID: outcome.teamID) != nil
     }
 
     nonisolated static func makeRow(_ outcome: AppCheckOutcome, icon: LocalInstalledIcon?, adminUpdates: Bool = false,
@@ -1900,6 +1957,10 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             else if !outcome.installable { status = .notInstallable }
             else if offer.format == .pkg && packageUpdates { status = .updateAvailable; privilege = .installer }
             else if offer.format == .pkg { status = .packageUnsupported }
+            else if needsAdmin && hasVendorPackage(outcome, format: offer.format, packageUpdates: packageUpdates) {
+                // Known to need admin rights, with a developer package: that comes before the experimental replacement.
+                status = .updateAvailable; privilege = .vendorPackage
+            }
             else { status = .updateAvailable; privilege = adminUpdates && needsAdmin ? .admin : .standard }
         }
         let manualAdmin = needsAdmin && !adminUpdates && status == .updateAvailable && privilege == .standard

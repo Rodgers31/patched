@@ -24,6 +24,8 @@ import UpdateSources
 // - Hand one verified Developer ID Installer package to Apple's Installer, which shows its own window and
 //   admin prompt. Package scripts then run as root under Apple's Installer, which is why the package's
 //   Developer ID Installer Team ID must equal the installed app's and Apple must have notarised it.
+// - For a root-owned app listed in `VendorPackages`, hand the developer's own package to Apple's Installer the
+//   same way, after its Distribution shows the offered version or newer (see `PackageDistribution`).
 // - Only from an explicit user action (a click in the app, or `patched update` typed at the Mac). The
 //   consent token `AdminInteraction` is created only there; scheduled checks never create one.
 
@@ -313,6 +315,126 @@ public enum PackageSignature {
     }
 }
 
+// MARK: Developer packages (VendorPackages): the Distribution's version
+
+/// Reads the Distribution of a package that has already passed `PackageVerifying`. The package is still treated
+/// as untrusted data: it is expanded into a private scratch folder by Apple's `pkgutil`, and only one regular,
+/// small file is read back.
+public protocol PackageDistributionReading: Sendable {
+    /// The Distribution XML of the flat package at `path`. `scratch` is a fresh private folder that the caller
+    /// removes afterwards.
+    func distribution(ofPackageAt path: String, scratch: String) throws -> Data
+}
+
+public struct SystemPackageDistributionReader: PackageDistributionReading {
+    let run: SystemPackageVerifier.Runner
+    public init(run: @escaping SystemPackageVerifier.Runner = { ProcessRunner.run($0, $1, timeout: $2) }) { self.run = run }
+
+    public func distribution(ofPackageAt path: String, scratch: String) throws -> Data {
+        // pkgutil creates the folder itself and refuses one that exists.
+        let expanded = scratch + "/expanded"
+        let result = run("/usr/sbin/pkgutil", ["--expand", path, expanded], 600)
+        guard result.succeeded else { throw InstallRefusal.packageMalformed("pkgutil --expand: \(result.summary)") }
+        return try PackageDistribution.readFile(expanded + "/Distribution")
+    }
+}
+
+/// What a package's Distribution says it installs for one bundle ID, and whether that is the offered version.
+public enum PackageDistribution {
+    /// Distributions are a few kilobytes; anything near this is not one.
+    public static let maxBytes = 1024 * 1024
+
+    /// One regular file, opened without following a symlink, at most `maxBytes`.
+    public static func readFile(_ path: String) throws -> Data {
+        // O_NONBLOCK: a FIFO in its place cannot hold the open; fstat then refuses anything but a regular file.
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        guard fd >= 0 else { throw InstallRefusal.packageMalformed("the package has no readable Distribution (\(String(cString: strerror(errno))))") }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var info = stat()
+        guard fstat(fd, &info) == 0, FileSafety.isRegular(info) else { throw InstallRefusal.packageMalformed("the package's Distribution is not a regular file") }
+        guard info.st_size <= maxBytes else { throw InstallRefusal.packageMalformed("the package's Distribution is \(info.st_size) bytes") }
+        let data = (try? handle.read(upToCount: maxBytes + 1)) ?? Data()
+        guard data.count <= maxBytes else { throw InstallRefusal.packageMalformed("the package's Distribution is too large") }
+        return data
+    }
+
+    public struct Versions: Sendable, Equatable {
+        /// `<pkg-ref id="BUNDLE" version="…">`, the package receipt's version.
+        public var packageRefs: [String] = []
+        /// `<bundle id="BUNDLE" CFBundleShortVersionString="…">`, the app's own version, when the Distribution says.
+        public var bundles: [String] = []
+    }
+
+    /// Every version the Distribution gives for `bundleID`. Repeated entries (a `pkg-ref` in a choice and again
+    /// with its version) are expected; entries without a version are ignored. External entities are never loaded.
+    public static func versions(in data: Data, bundleID: String) throws -> Versions {
+        let collector = Collector(bundleID: bundleID)
+        let parser = XMLParser(data: data)
+        parser.shouldResolveExternalEntities = false
+        parser.shouldProcessNamespaces = false
+        parser.delegate = collector
+        guard parser.parse(), collector.sawInstallerScript else {
+            throw InstallRefusal.packageMalformed("the package's Distribution is not an installer script"
+                + (parser.parserError.map { " (\(($0 as NSError).code))" } ?? ""))
+        }
+        return collector.versions
+    }
+
+    /// The version Apple's Installer will put in place, which must be the offered version or newer. Refused when
+    /// the Distribution names no version for this bundle ID, names different ones, or any of them is older.
+    public static func requireVersion(_ data: Data, bundleID: String, offer: UpdateOffer) throws -> String {
+        let found = try versions(in: data, bundleID: bundleID)
+        func distinct(_ list: [String]) -> [String] {
+            var out: [String] = []
+            for v in list where !out.contains(where: { SourceVersioning.compareDisplay($0, v, source: offer.source) == .orderedSame }) { out.append(v) }
+            return out
+        }
+        let refs = distinct(found.packageRefs), bundles = distinct(found.bundles)
+        guard !refs.isEmpty || !bundles.isEmpty else {
+            throw InstallRefusal.packageVersionMismatch("its Distribution names no version for \(bundleID)")
+        }
+        guard refs.count <= 1, bundles.count <= 1 else {
+            throw InstallRefusal.packageVersionMismatch("its Distribution names more than one version for \(bundleID): \((refs + bundles).joined(separator: ", "))")
+        }
+        for version in refs + bundles
+        where SourceVersioning.compareDisplay(version, offer.displayVersion, source: offer.source) == .orderedAscending {
+            throw InstallRefusal.packageVersionMismatch("it contains \(bundleID) \(version), older than the offered \(offer.displayVersion)")
+        }
+        // The app's own version when the Distribution gives it, else the package's.
+        return bundles.first ?? refs[0]
+    }
+
+    /// The offer the result is judged against afterwards: unchanged when the package holds exactly the offered
+    /// version, else the package's (newer) version with no build, since the checked build describes another file.
+    public static func expectedOffer(_ offer: UpdateOffer, packageVersion: String) -> UpdateOffer {
+        if SourceVersioning.compareDisplay(packageVersion, offer.displayVersion, source: offer.source) == .orderedSame { return offer }
+        return UpdateOffer(displayVersion: packageVersion, buildVersion: nil, downloadURL: offer.downloadURL, format: offer.format,
+                           source: offer.source)
+    }
+
+    private final class Collector: NSObject, XMLParserDelegate {
+        let bundleID: String
+        var versions = Versions()
+        var sawInstallerScript = false
+        init(bundleID: String) { self.bundleID = bundleID }
+
+        func parser(_ parser: XMLParser, didStartElement name: String, namespaceURI: String?, qualifiedName: String?,
+                    attributes: [String: String]) {
+            func value(_ key: String) -> String? {
+                attributes[key].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+            }
+            switch name {
+            case "installer-gui-script", "installer-script": sawInstallerScript = true
+            case "pkg-ref" where attributes["id"] == bundleID:
+                if let version = value("version") { versions.packageRefs.append(version) }
+            case "bundle" where attributes["id"] == bundleID:
+                if let version = value("CFBundleShortVersionString") { versions.bundles.append(version) }
+            default: break
+            }
+        }
+    }
+}
+
 /// Hands a verified package to Apple's Installer, which shows its own window and admin prompt.
 public protocol PackageInstallerOpening: Sendable {
     func openInstaller(forPackageAt path: String) throws
@@ -406,6 +528,10 @@ public struct AdminUpdatePath: Sendable {
     public let opener: any PackageInstallerOpening
     public let waiter: any InstallerCompletionWaiting
     public let session: any InteractiveSessionChecking
+    /// Reads a developer package's Distribution (`VendorPackages` only).
+    public let distributions: any PackageDistributionReading
+    /// The developer package routes by bundle ID: the compiled-in `VendorPackages`; checks pass their own.
+    public let packageRoutes: @Sendable (String?) -> VendorPackageRoute?
     /// Root-owned apps through macOS's prompt (PATCHED_ENABLE_ADMIN_UPDATES).
     public let allowsReplacement: Bool
     /// `.pkg` through Apple's Installer (on unless PATCHED_ENABLE_PKG_UPDATES=0).
@@ -413,8 +539,11 @@ public struct AdminUpdatePath: Sendable {
 
     public init(replacer: any PrivilegedReplacing, packages: any PackageVerifying, opener: any PackageInstallerOpening,
                 waiter: any InstallerCompletionWaiting, session: any InteractiveSessionChecking,
+                distributions: any PackageDistributionReading = SystemPackageDistributionReader(),
+                packageRoutes: @escaping @Sendable (String?) -> VendorPackageRoute? = { VendorPackages.route(forBundleID: $0) },
                 allowsReplacement: Bool, allowsPackages: Bool) {
         self.replacer = replacer; self.packages = packages; self.opener = opener; self.waiter = waiter; self.session = session
+        self.distributions = distributions; self.packageRoutes = packageRoutes
         self.allowsReplacement = allowsReplacement; self.allowsPackages = allowsPackages
     }
 

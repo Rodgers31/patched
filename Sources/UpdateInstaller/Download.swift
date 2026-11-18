@@ -23,7 +23,8 @@ public struct DownloadedArtifact: Sendable, Equatable {
 public final class ArtifactSink: @unchecked Sendable {
     private let fd: Int32
     public let path: String
-    private let maxBytes: Int64
+    /// The most this sink accepts; a server announcing more is refused before the body.
+    public let maxBytes: Int64
     private var sha256 = SHA256()
     private var sha512 = SHA512()
     public private(set) var byteCount: Int64 = 0
@@ -117,7 +118,12 @@ public struct URLSessionArtifactDownloader: ArtifactDownloading {
     /// When set, the first URL and every redirect must be on one of these hosts (lower case); nil allows any
     /// https host, as for vendor downloads.
     public let allowedHosts: Set<String>?
-    public init(allowedHosts: Set<String>? = nil) { self.allowedHosts = allowedHosts }
+    let makeConfiguration: @Sendable () -> URLSessionConfiguration
+    public init(allowedHosts: Set<String>? = nil) { self.init(allowedHosts: allowedHosts, configuration: { .ephemeral }) }
+    /// The same hardening applied to the configuration this returns (checks pass one with a stub `URLProtocol`).
+    public init(allowedHosts: Set<String>? = nil, configuration: @escaping @Sendable () -> URLSessionConfiguration) {
+        self.allowedHosts = allowedHosts; makeConfiguration = configuration
+    }
 
     public func download(_ url: URL, into sink: ArtifactSink, expectedLength: Int64?) async throws {
         guard url.scheme?.lowercased() == "https", url.host?.isEmpty == false else {
@@ -127,7 +133,7 @@ public struct URLSessionArtifactDownloader: ArtifactDownloading {
             throw InstallRefusal.insecureDownload("\(url.absoluteString) is not on an allowed host")
         }
         let delegate = StreamingDelegate(sink: sink, expectedLength: expectedLength, allowedHosts: allowedHosts)
-        let config = URLSessionConfiguration.ephemeral
+        let config = makeConfiguration()
         config.timeoutIntervalForRequest = DownloadLimits.idleTimeout
         config.timeoutIntervalForResource = DownloadLimits.totalTimeout
         config.httpCookieStorage = nil
@@ -198,7 +204,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate, @unchec
             fail(InstallRefusal.download("HTTP \(http.statusCode)"), dataTask); completionHandler(.cancel); return
         }
         let announced = http.expectedContentLength
-        if announced > DownloadLimits.maxBytes {
+        if announced > DownloadLimits.maxBytes || (expectedLength == nil && announced > sink.maxBytes) {
             fail(InstallRefusal.tooLarge("server announces \(announced) bytes"), dataTask); completionHandler(.cancel); return
         }
         if let expectedLength, announced >= 0, announced != expectedLength {

@@ -73,6 +73,9 @@ public enum InstallRefusal: Error, Sendable, Equatable {
     case packageSignatureInvalid(String)
     /// The installer package is not a plain flat (xar) package.
     case packageMalformed(String)
+    /// A developer's package (see `VendorPackages`) does not name the installed app's bundle ID at the offered
+    /// version or newer in its Distribution.
+    case packageVersionMismatch(String)
     /// Apple's Installer could not be opened.
     case installerFailed(String)
     /// Apple's Installer did not change the app (cancelled, still open, or the wait ran out).
@@ -135,6 +138,7 @@ public enum InstallRefusal: Error, Sendable, Equatable {
         case .needsAdminApproval: return "needs_admin_approval"
         case .packageSignatureInvalid: return "package_signature_invalid"
         case .packageMalformed: return "package_malformed"
+        case .packageVersionMismatch: return "package_version_mismatch"
         case .installerFailed: return "installer_failed"
         case .installerNotFinished: return "installer_not_finished"
         case .installedUnverified: return "installed_unverified"
@@ -191,6 +195,7 @@ public enum InstallRefusal: Error, Sendable, Equatable {
         case .adminReplaceUnavailable(let d): return "macOS refused the privileged replacement for this build; update this app manually: \(d)"
         case .packageSignatureInvalid(let d): return "installer package signature check failed: \(d)"
         case .packageMalformed(let d): return "installer package is not a plain flat package: \(d)"
+        case .packageVersionMismatch(let d): return "installer package does not contain the offered version or newer: \(d)"
         case .installerFailed(let d): return "could not open Apple's Installer: \(d)"
         case .installerNotFinished(let d): return "Apple's Installer did not install the update, so nothing was verified: \(d)"
         case .installedUnverified(let d): return "Apple's Installer changed the app, but it failed verification: \(d)"

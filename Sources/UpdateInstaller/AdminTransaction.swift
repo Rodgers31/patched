@@ -428,8 +428,13 @@ extension UpdateInstaller {
     /// Verifies the package (hash, size, EdDSA, flat format, Developer ID Installer Team ID, notarisation),
     /// keeps a copy of the installed app when it can, then hands the package to Apple's Installer and
     /// waits for the user. Afterwards the installed app must verify like any other update.
+    ///
+    /// With `vendor` (a developer package route for an app Patched cannot replace, see `VendorPackages`), the
+    /// download has that route's size ceiling, and after the signature and notarisation checks the package's
+    /// Distribution must name this bundle ID at the offered version or newer. The URL is unversioned, so the
+    /// package may be newer than the check's offer: the result is then judged against the package's version.
     func packageUpdate(_ target: InstallTarget, offer: UpdateOffer, options: UpdateOptions,
-                       consent: AdminConsent) async throws -> InstallReport {
+                       consent: AdminConsent, vendor: VendorPackageRoute? = nil) async throws -> InstallReport {
         if !options.dryRun { try requireInteractive(consent) }
         let lock = try begin(target)
         defer { withExtendedLifetime(lock) {} }
@@ -441,13 +446,25 @@ extension UpdateInstaller {
             try engine.write(&journal)
             try FileSafety.makeFreshPrivateDirectory(journal.downloadDir!)
             try makePrivilegedStaging(journal, target: target)
-            let artifact = try await download(offer, into: journal.downloadDir!)
+            let artifact = try await download(offer, into: journal.downloadDir!, maxBytes: vendor?.maxBytes)
             try SparkleSignature.check(publicKey: target.facts.sparklePublicEDKey, signature: offer.edSignature,
                                        archivePath: artifact.path)
             // The bytes about to be checked are made read-only, and checked again just before Installer opens.
             guard chmod(artifact.path, 0o400) == 0 else { throw InstallRefusal.io("cannot make the package read-only") }
-            try consent.path.packages.verifyPackage(at: artifact.path, teamID: target.teamID)
-            let offered = InstallTarget.versionText(offer.displayVersion, offer.buildVersion)
+            // A developer route also pins the developer's Team ID: the installed app's, and so the package's.
+            if let vendor, target.teamID != vendor.teamID {
+                throw InstallRefusal.packageSignatureInvalid("the installed app is Team ID \(target.teamID), the developer's package route is for \(vendor.teamID)")
+            }
+            try consent.path.packages.verifyPackage(at: artifact.path, teamID: vendor?.teamID ?? target.teamID)
+            var expected = offer
+            if vendor != nil {
+                expected = try vendorPackageOffer(offer, package: artifact.path, target: target, journal: journal,
+                                                  reader: consent.path.distributions)
+                // Recorded before Installer opens, so the result (now or in `recover`) is judged against it.
+                journal.offer = StoredOffer(expected)
+                try engine.write(&journal)
+            }
+            let offered = InstallTarget.versionText(expected.displayVersion, expected.buildVersion)
             if options.dryRun {
                 let left = try engine.settle(&journal, then: nil)
                 if !left.isEmpty {
@@ -455,7 +472,8 @@ extension UpdateInstaller {
                 }
                 return InstallReport(status: .dryRunPassed, bundleID: target.facts.bundleID, path: target.path,
                                      fromVersion: target.versionText, toVersion: offered, backupFolder: nil,
-                                     relaunched: false, privileged: true)
+                                     relaunched: false, privileged: true,
+                                     note: vendor.map { "the developer's installer package from \($0.packageURL.host ?? "?")" })
             }
             let wasRunning = try await ensureNotRunning(target, quit: options.quitIfRunning, allowHelpers: true)
             var backupProblem: String?
@@ -475,6 +493,10 @@ extension UpdateInstaller {
                     throw InstallRefusal.hashMismatch("the package changed after it was verified")
                 }
                 try makeEngine(allowHelpers: true).runningCheck(target.facts.bundleID, [target.path])
+                // A developer package came from an unversioned URL after a long download, during which the app's
+                // own updater may have moved it on: never hand Installer a package that is not newer than what is
+                // installed now, by the same rules as the check afterwards.
+                if vendor != nil { try Self.requireNewerThanInstalled(expected, appAt: target.path) }
                 journal.phase = .prepared
                 try engine.write(&journal)
                 try consent.path.opener.openInstaller(forPackageAt: artifact.path)
@@ -536,7 +558,39 @@ extension UpdateInstaller {
                                  toVersion: InstallTarget.versionText(now.shortVersion, now.build),
                                  backupFolder: journal.backupDir, relaunched: wasRunning, leftovers: result.leftovers,
                                  privileged: true, installedOwner: journal.installedOwner,
-                                 note: "installed by Apple's Installer" + (backupProblem.map { "; no backup could be kept (\($0)), so it cannot be rolled back" } ?? ""))
+                                 note: "installed by Apple's Installer"
+                                    + (vendor.map { " from the developer's package (\($0.packageURL.host ?? "?"))" } ?? "")
+                                    + (backupProblem.map { "; no backup could be kept (\($0)), so it cannot be rolled back" } ?? ""))
         }
+    }
+
+    /// Re-reads the installed app and refuses (`not_newer`) unless `expected` is strictly newer than it.
+    static func requireNewerThanInstalled(_ expected: UpdateOffer, appAt path: String) throws {
+        let now = try BundleFacts.read(bundleAt: path)
+        let newer = SourceVersioning.isNewer(candidateShort: expected.displayVersion, candidateBuild: expected.buildVersion,
+                                             installedShort: now.shortVersion, installedBuild: now.build,
+                                             source: expected.source, offered: expected.displayVersion)
+        guard case .success(true) = newer else {
+            throw InstallRefusal.notNewer("\((path as NSString).lastPathComponent) is now \(InstallTarget.versionText(now.shortVersion, now.build)), and the package holds \(expected.displayVersion), which is not newer")
+        }
+    }
+
+    /// Reads the verified package's Distribution in a private folder under this transaction's downloads, removes
+    /// that folder, and returns the offer the installed result must match (see `PackageDistribution`).
+    func vendorPackageOffer(_ offer: UpdateOffer, package: String, target: InstallTarget, journal: TransactionJournal,
+                            reader: any PackageDistributionReading) throws -> UpdateOffer {
+        guard let downloadDir = journal.downloadDir else { throw InstallRefusal.journal("no download folder") }
+        let scratch = downloadDir + "/distribution"
+        try FileSafety.makeFreshPrivateDirectory(scratch)
+        let data: Data
+        do {
+            data = try reader.distribution(ofPackageAt: package, scratch: scratch)
+        } catch {
+            try? FileSafety.removeTree(scratch, within: locations.downloads)
+            throw error
+        }
+        try FileSafety.removeTree(scratch, within: locations.downloads)
+        let version = try PackageDistribution.requireVersion(data, bundleID: target.facts.bundleID, offer: offer)
+        return PackageDistribution.expectedOffer(offer, packageVersion: version)
     }
 }

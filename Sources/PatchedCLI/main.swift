@@ -20,6 +20,8 @@ usage: patched check [--json] [--app <path>] [--explain <app path | bundle ID>]
        patched update <app path | bundle ID> [--quit] [--dry-run] [--json]
        patched update --all [--quit] [--dry-run] [--json]
          Downloads, verifies and installs updates for apps you can replace without admin rights.
+         Installer packages, and the developer's own package for a few apps owned by the system
+         (Google Chrome), open Apple's Installer, which asks for your password; only for one named app.
          --quit asks a running app to quit first (it is never force-killed). --dry-run verifies
          everything into a staging folder, then stops and cleans up.
        patched rollback <app path | bundle ID> [--quit]
@@ -559,11 +561,24 @@ func statusText(_ outcome: AppCheckOutcome) -> String {
     case .refused(let reason): return "refused: \(reason.message)"
     }
 }
+/// A system-owned app with a developer package route (VendorPackages): `patched update <app>` installs the
+/// developer's own signed package through Apple's Installer. Read-only here: the same preconditions as an update.
+let routeInstaller = packageUpdates ? makeInstaller() : nil
+func packageRouteNote(_ outcome: AppCheckOutcome) -> String {
+    guard let routeInstaller, case .updateAvailable(let offer) = outcome.result, offer.format != .pkg, outcome.installable,
+          !outcome.isAppStoreUpdate, routeInstaller.vendorPackageRoute(forBundleID: outcome.app.bundleID, appPath: outcome.app.path,
+                                                               teamID: outcome.teamID) != nil else { return "" }
+    do { _ = try routeInstaller.checkPreconditions(appPath: outcome.app.path, format: offer.format) }
+    catch let refusal as InstallRefusal where refusal.code == "needs_admin" {
+        return " (needs admin rights; installer package route available: `patched update \(outcome.app.bundleID ?? outcome.app.path)` opens Apple's Installer)"
+    } catch {}
+    return ""
+}
 let rows: [[String]] = outcomes.map { outcome in
     var latest = "-"
     if case .updateAvailable(let offer) = outcome.result { latest = offer.displayVersion }
     return [outcome.app.name, outcome.app.shortVersion ?? outcome.app.build ?? "?", latest,
-            outcome.source.map { ($0.isAppStore ? "app store" : $0.kind) + (outcome.lowConfidence ? "?" : "") } ?? "-", outcome.teamID ?? "-", statusText(outcome) + (outcome.lowConfidence ? " (add a catalogue entry to enable updates)" : "")]
+            outcome.source.map { ($0.isAppStore ? "app store" : $0.kind) + (outcome.lowConfidence ? "?" : "") } ?? "-", outcome.teamID ?? "-", statusText(outcome) + (outcome.lowConfidence ? " (add a catalogue entry to enable updates)" : "") + packageRouteNote(outcome)]
 }
 let header = ["APP", "INSTALLED", "LATEST", "SOURCE", "TEAM ID", "STATUS"]
 var measured = header.map(\.count)

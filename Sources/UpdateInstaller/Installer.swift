@@ -152,6 +152,14 @@ public struct UpdateInstaller: Sendable {
     /// Whether each part of the admin path is switched on (each still needs an `AdminInteraction` per call).
     public var adminUpdatesEnabled: Bool { adminPath?.allowsReplacement == true }
     public var packageUpdatesEnabled: Bool { adminPath?.allowsPackages == true }
+    /// The developer package route for this installed app (its bundle ID, at the package's install path, signed by
+    /// the developer's Team ID), when installer packages are switched on. It is used only for an app Patched cannot
+    /// replace itself, and only with consent for one explicit action.
+    public func vendorPackageRoute(forBundleID bundleID: String?, appPath: String, teamID: String?) -> VendorPackageRoute? {
+        guard packageUpdatesEnabled, let route = adminPath?.packageRoutes(bundleID),
+              route.applies(toAppAt: FileSafety.lexicallyNormalised(appPath), teamID: teamID) else { return nil }
+        return route
+    }
 
     var engine: SwapEngine { makeEngine(allowHelpers: false) }
 
@@ -196,6 +204,17 @@ public struct UpdateInstaller: Sendable {
     static func helperRefusal(name: String, path: String, _ helpers: [BundleProcess]) -> InstallRefusal {
         .helperRunning(HelperRefusalDetail.make(name: name,
                                                 helpers: helpers.map { $0.description(inBundle: path) }))
+    }
+
+    /// A cheap, read-only early hint that replacing `appPath` would need admin rights: the bundle itself is not
+    /// ours or not writable by its owner, or the folder it sits in is not writable by the current user. It
+    /// lstats two paths and never follows a symlink, walks the tree, writes or prompts. An install still runs
+    /// the full tree check and refuses as always; a missing path says "no" so nothing is guessed.
+    public static func likelyNeedsAdmin(appPath: String, uid: uid_t = geteuid()) -> Bool {
+        guard let info = FileSafety.lstatInfo(appPath), FileSafety.isDirectory(info) else { return false }
+        if info.st_uid != uid || info.st_mode & 0o200 == 0 { return true }
+        let parent = (appPath as NSString).deletingLastPathComponent
+        return access(parent, W_OK) != 0
     }
 
     // MARK: Step 1: preconditions
@@ -262,16 +281,19 @@ public struct UpdateInstaller: Sendable {
 
     // MARK: Step 2: download
 
-    public func download(_ offer: UpdateOffer, into directory: String, progress: UpdateProgressHandler? = nil) async throws -> DownloadedArtifact {
+    /// `maxBytes` lowers the general ceiling for this one download (a developer package route has its own).
+    public func download(_ offer: UpdateOffer, into directory: String, maxBytes: Int64? = nil,
+                         progress: UpdateProgressHandler? = nil) async throws -> DownloadedArtifact {
         guard offer.downloadURL.scheme?.lowercased() == "https" else {
             throw InstallRefusal.insecureDownload(offer.downloadURL.absoluteString)
         }
+        let ceiling = min(maxBytes ?? DownloadLimits.maxBytes, DownloadLimits.maxBytes)
         let expected = offer.length.map(Int64.init)
-        if let expected, expected > DownloadLimits.maxBytes || expected <= 0 {
-            throw InstallRefusal.tooLarge("feed length \(expected) is outside 1...\(DownloadLimits.maxBytes)")
+        if let expected, expected > ceiling || expected <= 0 {
+            throw InstallRefusal.tooLarge("feed length \(expected) is outside 1...\(ceiling)")
         }
         let path = directory + "/artifact." + offer.format.rawValue
-        let sink = try ArtifactSink(path: path, maxBytes: expected ?? DownloadLimits.maxBytes)
+        let sink = try ArtifactSink(path: path, maxBytes: expected ?? ceiling)
         sink.expectedTotal = expected
         if let progress {
             let throttle = ProgressThrottle()
@@ -568,6 +590,20 @@ public struct UpdateInstaller: Sendable {
         }
         guard installable else {
             throw InstallRefusal.notInstallable("the update source for \(appPath) is not confirmed (for example a Homebrew cask matched by filename only); add a catalogue entry")
+        }
+        // A system-owned app with a developer package route (VendorPackages): Apple's Installer installs the
+        // developer's own signed package instead of Patched replacing the app. Only with consent for the package
+        // part (an explicit single-app action) and only when Patched cannot replace the app itself. This comes
+        // before the experimental replacement, which is known not to work.
+        if offer.format != .pkg, let packageConsent = adminConsent(admin, packages: true),
+           let route = packageConsent.path.packageRoutes((try? BundleFacts.read(bundleAt: appPath))?.bundleID) {
+            let probe = try inspect(appPath: appPath, format: offer.format, allowAdmin: true)
+            // Only the copy the package installs, signed by the developer; anything else is refused as before.
+            if probe.adminReason != nil, probe.facts.bundleID == route.bundleID,
+               route.applies(toAppAt: FileSafety.lexicallyNormalised(probe.path), teamID: probe.teamID) {
+                return try await packageUpdate(probe, offer: route.packageOffer(for: offer), options: options,
+                                               consent: packageConsent, vendor: route)
+            }
         }
         let consent = adminConsent(admin, packages: offer.format == .pkg)
         let target = try inspect(appPath: appPath, format: offer.format, allowAdmin: consent != nil)

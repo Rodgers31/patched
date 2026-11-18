@@ -23,7 +23,8 @@ public enum CommandLineUpdates {
     }
 
     /// One update, as the CLI runs it. Under `--all`, an app that the switched-on admin path could handle
-    /// is refused with `needs_admin_approval`, naming the single-app command; nothing privileged is tried.
+    /// (including a system-owned app with a developer package route, see `VendorPackages`) is refused with
+    /// `needs_admin_approval`, naming the single-app command; nothing privileged is tried.
     public static func update(_ outcome: AppCheckOutcome, installer: UpdateInstaller, options: UpdateOptions,
                               scope: Scope, notice: @escaping @Sendable (String) -> Void) async throws -> InstallReport {
         do {
@@ -31,8 +32,11 @@ public enum CommandLineUpdates {
         } catch let refusal as InstallRefusal where scope == .all {
             var isPackage = false
             if case .updateAvailable(let offer) = outcome.result { isPackage = offer.format == .pkg }
+            // A system-owned app with a developer package route would go through Apple's Installer when named.
+            let routed = !isPackage && installer.vendorPackageRoute(forBundleID: outcome.app.bundleID, appPath: outcome.app.path,
+                                                                     teamID: outcome.teamID) != nil
             switch refusal {
-            case .needsAdmin where installer.adminUpdatesEnabled,
+            case .needsAdmin where installer.adminUpdatesEnabled || routed,
                  .unsupportedFormat where isPackage && installer.packageUpdatesEnabled:
                 throw InstallRefusal.needsAdminApproval(outcome.app.path)
             default:

@@ -157,7 +157,8 @@ func backup(_ app: InstalledApp, version: String = "0.9") throws -> BackupRecord
 @MainActor func makeController(outcomes: [AppCheckOutcome], installer: FakeInstaller = FakeInstaller(),
                                recorder: Recorder? = nil, world: World? = nil,
                                catalogue: @escaping AppUpdateCatalogueProbe = { nil }, adminUpdates: Bool = false,
-                               packageUpdates: Bool = false, editCatalogue: AppUpdateCatalogueEdit? = nil) -> AppUpdatesController {
+                               packageUpdates: Bool = false, editCatalogue: AppUpdateCatalogueEdit? = nil,
+                               likelyNeedsAdmin: @escaping @Sendable (String) -> Bool = { _ in false }) -> AppUpdatesController {
     let recorder = recorder ?? installer.recorder
     let world = world ?? World(outcomes)
     installer.world = world
@@ -165,7 +166,8 @@ func backup(_ app: InstalledApp, version: String = "0.9") throws -> BackupRecord
         scan: { recorder.note("scan"); return outcomes.compactMap { world[$0.app.path] }.map { AppUpdateScannedApp(app: $0.app, icon: nil) } },
         check: { apps in recorder.note("check"); return apps.compactMap { world[$0.path] } },
         recheck: { path in recorder.note("recheck \((path as NSString).lastPathComponent)"); return world[path] },
-        catalogue: catalogue, editCatalogue: editCatalogue, installer: installer, adminUpdates: adminUpdates, packageUpdates: packageUpdates)
+        catalogue: catalogue, editCatalogue: editCatalogue, installer: installer, adminUpdates: adminUpdates, packageUpdates: packageUpdates,
+        likelyNeedsAdmin: likelyNeedsAdmin)
 }
 @MainActor func runCheck(_ controller: AppUpdatesController) async {
     controller.check(); await controller.waitUntilIdle()

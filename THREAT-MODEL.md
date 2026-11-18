@@ -231,8 +231,8 @@ every check in "What is checked for every update" applies, and each app is reche
 before its install.
 
 Exclusions, enforced twice (in Update All's selection and again in the automatic form):
-installer packages (Apple's Installer needs a password), root-owned or admin apps (consent is
-never passed), Patched itself (self-update stays an explicit confirmed click), hidden apps and
+installer packages (Apple's Installer needs a password), root-owned or admin apps, including
+those with a developer package route (consent is never passed), Patched itself (self-update stays an explicit confirmed click), hidden apps and
 Mac App Store apps (the App Store is not even opened). Open apps are skipped and never quit,
 and recovery never runs. It waits while an install, roll back or recovery is running, and is
 skipped after a check that mostly failed offline. It does not wake the Mac or hold power
@@ -410,7 +410,9 @@ code. A scheduled run that found nothing, or had to wait, is recorded too. `patc
 - **A developer's own signing key or update server being compromised.** An update
   signed and notarised under the right Team ID is accepted.
 - **Root, admin-owned apps and `.pkg` installers.** Refused (`needs_admin`,
-  `unsupported_format`) unless the experimental admin path below is switched on.
+  `unsupported_format`) unless the admin path below can take them: installer packages
+  (on by default), a developer package route for a root-owned app (see "Developer
+  packages for root-owned apps"), or the experimental replacement.
 
 ## When something goes wrong
 
@@ -505,8 +507,9 @@ manually").
   prompt and a granted authorization, but `FileManager(authorization:).replaceItemAt`
   then failed with NSCocoaErrorDomain 512 / POSIX EIO, for a root-owned folder and
   for a single root-owned file. Patched reports this as `admin_replace_unavailable`
-  ("update this app manually") and changes nothing. It is to be revisited once there
-  is Developer ID signing. There is no fallback to `osascript`, `do shell script`,
+  ("update this app manually") and changes nothing. Re-tested on 18 November 2026
+  with a Developer ID build: it still fails with EIO, so it stays off and nothing
+  else builds on it. There is no fallback to `osascript`, `do shell script`,
   `sudo` or any other way of running commands as root.
 - **Installer packages**: on by default since 9 November 2026;
   `PATCHED_ENABLE_PKG_UPDATES=0` turns them off. This does not depend on Patched's
@@ -568,6 +571,63 @@ Installer and cannot be avoided or inspected, so the package must earn that:
    (cancelled, still open, or after the 30-minute wait), nothing is verified and
    nothing more happens.
 
+**Developer packages for root-owned apps.** A root-owned app (for example Google
+Chrome after its "update for all users" step, or an MDM install) whose normal update
+source offers a zip or dmg can be updated through the developer's own signed package
+instead, by the installer package path above. This is a new download source:
+
+- The package URL comes only from a compiled-in table, `VendorPackages`
+  (`Sources/UpdateSources/VendorPackages.swift`), keyed by exact bundle ID; nothing
+  is read from disk or the network to build it. Today it has one entry,
+  `com.google.Chrome` at
+  `https://dl.google.com/dl/chrome/mac/universal/stable/gcem/GoogleChrome.pkg`
+  ("Developer ID Installer: Google LLC (EQHXZ8M8AV)", notarised). Each entry also
+  pins where the package installs the app (`/Applications/Google Chrome.app`) and the
+  developer's Team ID (`EQHXZ8M8AV`): the route applies only to an app at exactly that
+  path (after collapsing `//`, `.` and `..`) whose own Team ID is that one, and so the
+  package's Developer ID Installer Team ID must be that one too. A copy anywhere
+  else, or signed by anyone else, is refused `needs_admin` as before.
+- It is used only when all of these hold: installer packages are on, the action
+  carries an `AdminInteraction` (one app's Update… click, or `patched update <app>`),
+  the offer is not already a `.pkg`, and Patched's own preconditions find that it
+  cannot replace the installed app itself (`needs_admin`). A user-owned copy is
+  updated the ordinary way. Update All (window, menu, notification, `--all`) and
+  automatic updates never use it; the app marks such rows "Needs admin" and leaves
+  them out of Update All, and `--all` answers `needs_admin_approval`. With the
+  experimental replacement also switched on, the package route comes first.
+- The version on offer still comes from the app's normal check (Homebrew, for
+  example). Only the download is replaced: HTTPS only, with the same redirect rules,
+  a size ceiling for the route (1 GiB, also applied to the server's Content-Length
+  before any of the body is accepted), and none of the original download's length,
+  hashes or signature, which describe a different file. An app that pins a Sparkle
+  key fails closed, because the package carries no EdDSA signature.
+- Steps 2 to 4 above apply unchanged: flat package, Developer ID Installer chain for
+  the installed app's Team ID, notarised for that Team ID. Only then is the package
+  expanded with `pkgutil --expand` into a private folder under the transaction's
+  downloads, and one file is read back: `Distribution`, a regular file opened
+  without following symlinks or blocking (a FIFO is refused), at most 1 MiB, parsed as XML with external entities
+  off. It must name this exact bundle ID (`<pkg-ref id=… version=…>` or
+  `<bundle id=… CFBundleShortVersionString=…>`) with one version, and that version
+  must be the offered version or newer. A missing or unreadable Distribution is
+  `package_malformed`; no version, conflicting versions, another bundle ID only, or
+  an older version is `package_version_mismatch`. Apple's Installer is never opened
+  after either.
+- **The URL is unversioned.** It may serve a newer build than the one the check
+  offered, or (after a rollback by the vendor, or a stale cache) an older one. The
+  Distribution check refuses an older one before Installer opens. For a newer one,
+  the version Patched expects afterwards becomes the package's version (the app's
+  own version when the Distribution gives it), recorded in the journal before
+  Installer opens, so step 6 and `recover` require exactly what the package said it
+  contains. The app's own updater may also move the installed app on during the
+  download: immediately before Installer opens, the installed app is read again and
+  the update is refused (`not_newer`) unless the package's version is strictly newer
+  than it, by the same rules as the check afterwards. The Distribution is part of the signed package, so this version comes
+  from the same Developer ID Installer signature as everything else in it.
+- The running-app rule is the package path's: the app itself running is refused
+  before anything is downloaded (`app_running`); the window then asks to quit,
+  update and reopen, and `patched update --quit` asks it to quit. It is reopened only
+  after the result verifies.
+
 **No rollback for packages.** A package can install more than the app (launch
 daemons, kernel or system extensions, files elsewhere), so putting back only the old
 `.app` would leave a mismatched install. Rollback is therefore not supported after a
@@ -580,4 +640,8 @@ something that fails verification, that copy is kept for the same reason.
 **What the admin path adds to what is trusted.** Apple's authorization prompt and
 `FileManager(authorization:)`, Apple's Installer and `installd`, and the scripts
 inside a package signed with the installed app's Developer ID Installer Team ID and
-notarised by Apple.
+notarised by Apple. For a developer package route, also the HTTPS host in
+`VendorPackages` that serves the package (any HTTPS redirect target is accepted, as
+for other vendor downloads; the signature, Team ID, notarisation and Distribution
+checks are what bind the bytes to the developer), and `pkgutil --expand` reading a
+package that has already passed those signature checks.

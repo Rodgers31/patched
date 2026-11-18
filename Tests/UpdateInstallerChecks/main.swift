@@ -2043,6 +2043,7 @@ check("no shell anywhere and processes only through the fixed-path runner") {
 }
 
 registerAdminChecks()
+registerVendorPackageChecks()
 registerSelfServiceChecks()
 registerSelfUpdateChecks()
 
